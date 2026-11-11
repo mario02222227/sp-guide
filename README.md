@@ -2,6 +2,9 @@
 
 一个**非官方、非盈利**的《明日方舟》「卫戍协议：规程」攻略海报。
 
+- 在线版：<https://sp-guide.pages.dev/>
+- GitHub 镜像 / 源码仓库：<https://github.com/mario02222227/sp-guide>（Pages：<https://mario02222227.github.io/sp-guide/>，国内首屏较慢，优先用上面的 Cloudflare）
+
 - 固定 **4:3** 画布：设计分辨率 **1600 × 1200**
 - 屏幕按视口整体等比缩放，不重排、不滚动
 - 导出 **3200 × 2400 PNG**

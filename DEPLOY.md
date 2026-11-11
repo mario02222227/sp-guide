@@ -12,6 +12,29 @@
 
 > 国内云服务器放网站需要 **ICP 备案**；GitHub Pages / Cloudflare Pages 不需要。先别买服务器。
 
+## 本次部署（已上线）
+
+| 入口 | 地址 | 说明 |
+|---|---|---|
+| 主入口（Cloudflare） | <https://sp-guide.pages.dev/> | 国内访问快，分享用这个 |
+| GitHub Pages | <https://mario02222227.github.io/sp-guide/> | 源码仓库：<https://github.com/mario02222227/sp-guide>；国内首屏要等 1–2 分钟（2.8 MB 的素材文件被限速） |
+
+更新（改完内容后）：
+
+```powershell
+node tools/make-deploy.mjs
+
+# Cloudflare
+$env:CLOUDFLARE_ACCOUNT_ID = "bde83874dc63c966237ec4d8c68542c4"
+node "$env:TEMP\sp-wrangler\node_modules\wrangler\bin\wrangler.js" pages deploy deploy --project-name=sp-guide --branch=main --commit-dirty=true
+
+# GitHub（登录态由 gh 保存在本机）
+$env:GITHUB_TOKEN = (& "$env:TEMP\gh\bin\gh.exe" auth token)
+node tools/deploy-github.mjs
+```
+
+> `$env:TEMP` 被清理后，这两条命令会找不到 wrangler / gh；重新装一次即可，或改用各自的网页面板。
+
 ## 方案 A：GitHub Pages
 
 1. 把整个仓库推到 GitHub（**公开**仓库；`index.html` 要在仓库根目录，不是只传 `dist/`）。没装 Git 也可以用 GitHub Desktop，或在网页上直接拖拽上传。
