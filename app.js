@@ -727,7 +727,7 @@
       rows = reached.map(row).join('') + (unreached.length ? sep : '') + unreached.map(row).join('');
     }
     return '<section class="panel bonds-panel">' +
-      '<div class="panel-head"><span class="panel-title">羁绊</span><span class="panel-note">只保谢拉格</span></div>' +
+      '<div class="panel-head"><span class="panel-title">羁绊</span></div>' +
       '<div class="bond-list' + (twoCol ? ' two-col' : '') + '">' + rows + '</div>' +
     '</section>';
   }
@@ -749,7 +749,7 @@
       '</div>';
     }).join('');
     return '<section class="panel equip-panel">' +
-      '<div class="panel-head"><span class="panel-title">装备</span><span class="panel-note">3 行 · 图标</span></div>' +
+      '<div class="panel-head"><span class="panel-title">装备</span></div>' +
       (rows ? '<div class="equip-matrix">' + head + rows + '</div>' : '<div class="panel-empty">拖入干员后自动生成装备位</div>') +
     '</section>';
   }
@@ -793,7 +793,7 @@
       '</div>';
     }).join('');
     return '<section class="panel stages-panel">' +
-      '<div class="panel-head"><span class="panel-title">成型节奏</span><span class="panel-note">阵容怎么成型 · 每阶段一句话</span></div>' +
+      '<div class="panel-head"><span class="panel-title">成型节奏</span></div>' +
       '<div class="stages-list">' + blocks + '</div>' +
     '</section>';
   }

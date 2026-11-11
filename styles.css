@@ -924,7 +924,7 @@ body.is-exporting .stage-row.empty { display: none; }
 /* Strategy panel v2: 306px, full effect text */
 .strategy-panel { position: relative; height: 360px; padding: 8px 10px; }
 .strategy-panel .panel-head { flex-basis: 20px; height: 20px; }
-.strategy-main-card { min-width: 0; }
+.strategy-main-card { min-width: 0; margin-top: 8px; }
 .strategy-main-row { height: 48px; display: flex; align-items: flex-start; gap: 6px; }
 .strategy-main-row .strategy-icon { width: 48px; height: 48px; flex-basis: 48px; }
 .strategy-main-body { min-width: 0; flex: 1 1 auto; }
