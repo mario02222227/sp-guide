@@ -2410,7 +2410,7 @@
     }
     state.board.placements = list;
     syncLineup();
-    if (editMode) beginPendingPlacement(id, before, dir || previewDir, '移动');
+    if (editMode) beginPendingPlacement(id, before, dir || previewDir, from ? '移动' : '放入');
     saveNow();
     renderPoster();
     renderRoster();
