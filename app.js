@@ -1049,6 +1049,7 @@
       layoutBoard();
       fitPoster();
       checkOverflow();
+      refreshPendingPreview();
       if (editMode) { bindBoardDnD(); bindStageDnD(); }
     });
     if (MISSING_IDS.size && !missingToastShown) {
@@ -1705,11 +1706,16 @@
       equipment: clone(state.equipment || [])
     };
   }
-  function beginPendingPlacement(id, before) {
-    pendingPlacement = { id, before, ignoreUntil: Date.now() + 200 };
+  function beginPendingPlacement(id, before, dir = '', verb = '放入') {
+    pendingPlacement = { id, before, dir: dir ? normalizeFacing(dir) : '', ignoreUntil: Date.now() + 220 };
     directionDrag = null;
     suppressClickUntil = Date.now() + 200;
     document.body.classList.add('choosing-facing');
+    const coach = $('#facingCoach');
+    if (coach) {
+      const name = op(id)?.name || '棋子';
+      coach.innerHTML = '<b>已' + esc(verb) + ' ' + esc(name) + '</b><span>按住棋子向外拖动选择朝向，松手确定 · 点空白处撤销</span>';
+    }
   }
   function cancelPendingPlacement(silent) {
     const p = pendingPlacement;
@@ -1750,7 +1756,7 @@
     toast('朝向：' + FACING_LABEL[normalizeFacing(dir)]);
   }
 
-  function placeRoster(id, row, col, facing = '') {
+  function placeRoster(id, row, col, facing = '', previewDir = '') {
     if (!editMode || !hasOperator(id)) return;
     if (pendingPlacement) cancelPendingPlacement(true);
     const before = boardSnapshot();
@@ -1758,7 +1764,8 @@
     const old = list.find((p) => p.operatorId === id);
     const target = list.find((p) => Number(p.row) === row && Number(p.col) === col);
     if (target && target.operatorId === id) { clearRosterSelection(); return; }
-    const dir = facing ? normalizeFacing(facing) : (old ? normalizeFacing(old.facing) : 'right');
+    // 新放入的棋子不预设朝向（facing 留空），只按落点方向做一次预览。
+    const dir = facing ? normalizeFacing(facing) : (old ? normalizeFacing(old.facing) : '');
     if (target) {
       if (old && old !== target) state.board.placements = list.filter((p) => p !== old);
       target.operatorId = id;
@@ -1769,14 +1776,14 @@
       list.push({ operatorId: id, row, col, facing: dir });
     }
     syncLineup();
-    beginPendingPlacement(id, before);
+    beginPendingPlacement(id, before, dir || previewDir);
     saveNow();
     renderPoster();
     renderRoster();
     renderVariants();
     clearRosterSelection();
     if (op(id)?.inPool === false) toast('该干员不在当前规程池', true);
-    else toast('已放入 ' + op(id).name + '：按住棋子拖动选择朝向；点其他地方撤销');
+    else toast('已放入 ' + op(id).name);
   }
 
   function removePlacement(id) {
@@ -2274,10 +2281,10 @@
     $$('.board-cell.range-origin').forEach((el) => el.classList.remove('range-origin'));
     $$('[data-stage-drop].drop-ok, [data-equip-drop].drop-ok').forEach((el) => el.classList.remove('drop-ok'));
   }
-  function previewDrop(cell, x, y, id) {
+  function applyFacingPreview(cell, dir, id) {
     if (!cell) return;
     cell.querySelector('.facing-hint')?.remove();
-    const dir = directionFromPoint(cell, x, y) || cell.dataset.dropFacing || 'right';
+    dir = normalizeFacing(dir);
     cell.dataset.dropFacing = dir;
     $$('.board-cell .drop-facing').forEach((el) => { if (el.parentElement !== cell) el.remove(); });
     $$('.board-cell.range-preview').forEach((el) => el.classList.remove('range-preview'));
@@ -2298,6 +2305,22 @@
       if (target) target.classList.add('range-preview');
     }
     cell.classList.add('range-origin');
+  }
+  function previewDrop(cell, x, y, id) {
+    if (!cell) return;
+    const dir = directionFromPoint(cell, x, y) || cell.dataset.dropFacing || 'right';
+    applyFacingPreview(cell, dir, id);
+  }
+  // 放入后立刻把攻击范围亮出来：优先用落点相对格子中心的方向，取不到再用上一次预览。
+  function refreshPendingPreview() {
+    const p = pendingPlacement;
+    if (!p || !editMode) return;
+    const placement = (state.board?.placements || []).find((x) => x.operatorId === p.id);
+    if (!placement) return;
+    const cell = $('.board-cell[data-row="' + placement.row + '"][data-col="' + placement.col + '"]');
+    if (!cell) return;
+    applyFacingPreview(cell, p.dir || 'right', p.id);
+    cell.classList.add('drop-ok');
   }
 
   function bindStageDnD() {
@@ -2349,8 +2372,9 @@
         clearDropPreview();
         draggedOperatorId = null;
         if (!hasOperator(id)) return;
-        if (type === 'board') movePlacement(id, Number(cell.dataset.row), Number(cell.dataset.col));
-        else placeRoster(id, Number(cell.dataset.row), Number(cell.dataset.col));
+        const dir = directionFromPoint(cell, e.clientX, e.clientY) || '';
+        if (type === 'board') movePlacement(id, Number(cell.dataset.row), Number(cell.dataset.col), '', dir);
+        else placeRoster(id, Number(cell.dataset.row), Number(cell.dataset.col), '', dir);
       });
     });
   }
@@ -2367,14 +2391,14 @@
     toast('朝向：' + (FACING_LABEL[p.facing] || p.facing));
   }
 
-  function movePlacement(id, row, col, facing = '') {
+  function movePlacement(id, row, col, facing = '', previewDir = '') {
     if (!hasOperator(id)) return;
     if (pendingPlacement) cancelPendingPlacement(true);
     const before = boardSnapshot();
     const list = state.board.placements || [];
     const from = list.find((p) => p.operatorId === id);
     const to = list.find((p) => Number(p.row) === row && Number(p.col) === col);
-    const dir = facing ? normalizeFacing(facing) : (from ? normalizeFacing(from.facing) : 'right');
+    const dir = facing ? normalizeFacing(facing) : (from ? normalizeFacing(from.facing) : '');
     if (from && to && from !== to) {
       const fr = from.row, fc = from.col, ff = from.facing;
       from.row = to.row; from.col = to.col; from.facing = dir;
@@ -2386,7 +2410,7 @@
     }
     state.board.placements = list;
     syncLineup();
-    if (editMode) beginPendingPlacement(id, before);
+    if (editMode) beginPendingPlacement(id, before, dir || previewDir, '移动');
     saveNow();
     renderPoster();
     renderRoster();
@@ -2458,7 +2482,7 @@
       const cell = e.target.closest('.board-cell.empty');
       if (!cell) return;
       e.preventDefault();
-      movePlacement(selectedRosterId, Number(cell.dataset.row), Number(cell.dataset.col));
+      movePlacement(selectedRosterId, Number(cell.dataset.row), Number(cell.dataset.col), '', directionFromPoint(cell, e.clientX, e.clientY) || '');
     });
   }
   function bindFacingChoice() {
@@ -3036,7 +3060,7 @@
     if (editMode && selectedRosterId) {
       const cell = e.target.closest('.board-cell');
       if (cell) {
-        placeRoster(selectedRosterId, Number(cell.dataset.row), Number(cell.dataset.col));
+        placeRoster(selectedRosterId, Number(cell.dataset.row), Number(cell.dataset.col), '', directionFromPoint(cell, e.clientX, e.clientY) || '');
         return;
       }
     }
