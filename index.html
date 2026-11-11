@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>卫戍协议 · 规程｜谢拉格冻结叠层一图流</title>
+  <meta name="description" content="明日方舟「卫戍协议：规程」谢拉格冻结叠层一图流：主叠层、主输出、装备、站位与 1-14 回合路线。固定 4:3 海报，可编辑、可导出 3200×2400 PNG。" />
+  <meta name="theme-color" content="#0b0706" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%230b0706'/%3E%3Cpath d='M14 44V20h8l10 14 10-14h8v24h-8V32L32 46 22 32v12z' fill='%23ffc400'/%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="regulation-theme.css" />
+</head>
+<body>
+  <header class="appbar">
+    <div class="appbar-actions">
+      <span class="save-state" id="saveState" aria-live="polite">已自动保存</span>
+      <button class="btn btn-ghost" id="mapsBtn" type="button">
+        <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M3 6l6-3 6 3 6-3v15l-6 3-6-3-6 3V6zm6-3v15m6-12v15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>
+        <span>战场地图</span>
+      </button>
+      <button class="btn btn-ghost" id="shareBtn" type="button">
+        <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M12 3v11m0-11 4 4m-4-4-4 4M5 13v7h14v-7" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span>分享</span>
+      </button>
+      <button class="btn btn-ghost" id="editBtn" type="button" aria-pressed="false">
+        <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M4 20h4L19 9l-4-4L4 16v4zm11.5-14.5 4 4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>
+        <span>编辑</span>
+      </button>
+      <button class="btn btn-primary" id="exportBtn" type="button">
+        <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M12 3v12m0 0 4-4m-4 4-4-4M4 17v3h16v-3" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span>导出一图流</span>
+      </button>
+      <button class="btn btn-ghost btn-help" id="helpBtn" type="button" aria-label="使用说明" title="三步上手">
+        <span>?</span>
+      </button>
+    </div>
+  </header>
+
+  <main class="stage" id="stage">
+    <div class="poster-shell" id="posterShell">
+      <article class="poster" id="poster" aria-label="卫戍协议规程谢拉格一图流"></article>
+    </div>
+  </main>
+
+  <aside class="drawer drawer-left" id="rosterDrawer" hidden aria-label="干员库">
+    <div class="drawer-head">
+      <div><strong>干员库</strong><span>拖到棋盘，或双击看详情；点选后点格子</span></div>
+      <button class="drawer-close" type="button" data-close-drawer="roster" aria-label="关闭干员库">×</button>
+    </div>
+    <div class="drawer-filters" id="rosterFilters"></div>
+    <div class="roster-list" id="rosterList"></div>
+  </aside>
+
+  <aside class="drawer drawer-right" id="equipmentDrawer" hidden aria-label="装备库">
+    <div class="drawer-head">
+      <div><strong>装备库</strong><span>拖到棋盘下方的装备格；点图标看用途</span></div>
+      <button class="drawer-close" type="button" data-close-drawer="equipment" aria-label="关闭装备库">×</button>
+    </div>
+    <div class="drawer-filters"><input class="roster-search" id="equipmentSearch" placeholder="搜索装备" /></div>
+    <div class="equipment-detail" id="equipmentDetail"></div>
+    <div class="equipment-library" id="equipmentList"></div>
+  </aside>
+
+  <aside class="drawer drawer-right" id="variantDrawer" hidden aria-label="备选与变阵">
+    <div class="drawer-head">
+      <div><strong>备选干员</strong><span>点击头像选中，再点棋盘放置</span></div>
+      <button class="drawer-close" type="button" data-close-drawer="variant" aria-label="关闭变阵">×</button>
+    </div>
+    <div class="variant-body" id="variantBody"></div>
+  </aside>
+
+  <div class="edit-bar" id="editBar" hidden>
+    <div class="edit-bar-copy">
+      <strong>编辑模式</strong>
+      <span>改文字、拖站位、点装备/路线头像替换；改动自动保存。编辑装饰不会进入导出图。</span>
+    </div>
+    <div class="edit-bar-actions">
+      <button class="btn btn-small" id="newBtn" type="button">新建</button>
+      <button class="btn btn-small" id="boardBtn" type="button">棋盘</button>
+      <button class="btn btn-small" id="rosterBtn" type="button" aria-expanded="false">干员库</button>
+      <button class="btn btn-small" id="equipmentBtn" type="button" aria-expanded="false">装备库</button>
+      <button class="btn btn-small" id="variantBtn" type="button" aria-expanded="false">备选</button>
+      <button class="btn btn-small" id="saveBtn" type="button">存档</button>
+      <button class="btn btn-small" id="importBtn" type="button">导入</button>
+      <button class="btn btn-small" id="saveDataBtn" type="button">导出数据</button>
+      <button class="btn btn-small btn-danger" id="resetBtn" type="button">恢复示例</button>
+    </div>
+  </div>
+
+  <div class="zoom-hint" id="zoomHint" hidden>海报在手机上会被缩小。<b>点右下角「放大」</b>按原尺寸查看，可拖动。</div>
+  <button class="zoom-btn" id="zoomBtn" type="button" aria-pressed="false" title="放大看细节（也可双击海报）">
+    <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    <span>放大</span>
+  </button>
+  <input id="importFile" type="file" accept="application/json,.json" hidden />
+  <div id="modalRoot"></div>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <script src="vendor/html-to-image.js"></script>
+  <script src="vendor/lz-string.min.js"></script>
+  <script src="vendor/qrcode.js"></script>
+  <script src="assets-embed.js"></script>
+  <script src="data/stronghold.js"></script>
+  <script src="data/closure.js"></script>
+  <script src="data/roster-prts.js"></script>
+  <script src="data/prts.js"></script>
+  <script src="data/pinyin.js"></script>
+  <script src="data/maps.js"></script>
+  <script src="data.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
