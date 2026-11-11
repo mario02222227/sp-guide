@@ -606,13 +606,14 @@
       .join('');
     const coreHtml = core || '<div class="header-empty">从左侧干员库拖入<br>棋盘后点 ☆ 加入右上角</div>';
     const entry = siteUrl();
-    const stampQr = entry ? qrDataUrl(entry, 76) : '';
+    const showQr = !!state.meta.showQr;
+    const stampQr = showQr && entry ? qrDataUrl(entry, 76) : '';
     const stamp = stampQr
       ? '<div class="header-stamp" title="' + attr('扫码看最新版 / 纠错：' + entry) + '">' +
           '<img src="' + stampQr + '" alt="二维码" draggable="false" />' +
           '<span class="header-stamp-copy"><b>扫码</b><i>看最新版</i><i>纠错 / 反馈</i></span>' +
         '</div>'
-      : (editMode ? '<button class="header-stamp empty edit-only" type="button" data-open-share title="设置海报上的入口链接"><i>+ 入口二维码</i></button>' : '');
+      : (showQr && editMode ? '<button class="header-stamp empty edit-only" type="button" data-open-share title="设置海报上的入口链接"><i>+ 入口二维码</i></button>' : '');
     return '<header class="poster-header">' +
       '<div class="header-left">' +
         '<h1 class="header-title" data-edit="meta.title" data-max="24">' + esc(m.title) + '</h1>' +
@@ -1041,7 +1042,7 @@
       '</div>' +
       renderFooter();
     syncEditable();
-    document.body.classList.toggle('has-entry', !!siteUrl());
+    document.body.classList.toggle('has-entry', !!(state.meta.showQr && siteUrl()));
     document.body.classList.toggle('choosing-facing', !!pendingPlacement);
     if (!$('#equipmentDrawer')?.hidden) renderEquipmentLibrary();
     requestAnimationFrame(() => {
@@ -2587,7 +2588,7 @@
     openModal('<div class="poster-wrap" style="padding:12px"><img src="' + dataUrl + '" alt="卫戍协议规程一图流" style="width:100%;height:auto;border:1px solid var(--line)" /></div>' +
       '<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:0 12px 12px;flex-wrap:wrap">' +
         '<span class="detail-note">3200 × 2400 PNG · 长按图片也可保存' +
-          (siteUrl() ? '' : ' · <span style="color:var(--orange)">未设入口链接，这张图不带二维码（分享 → 海报入口链接）</span>') +
+          (state.meta.showQr && !siteUrl() ? ' · <span style="color:var(--orange)">已开启二维码但没设入口链接，这张图不带码（分享 → 入口二维码）</span>' : '') +
         '</span>' +
         '<a class="btn btn-primary" href="' + dataUrl + '" download="' + name + '">下载 PNG</a>' +
       '</div>', true);
@@ -2724,9 +2725,10 @@
         ? '<span style="color:var(--orange)">链接较长（' + url.length + ' 字符），部分聊天软件可能截断；更稳的是「导出数据」发文件。</span>'
         : '链接长度 ' + url.length + ' 字符。') + ' 手机扫上面的码可直接打开同一版。</p>' +
       '<div class="form-grid" style="margin-top:16px">' +
-        '<div class="field full"><label>海报入口二维码（长期链接）</label>' +
+        '<div class="field full"><label>海报 / 长图入口二维码</label>' +
+          '<label class="share-toggle"><input type="checkbox" id="shareQrToggle" ' + (state.meta.showQr ? 'checked ' : '') + '/> 在导出的海报和竖版长图上印二维码</label>' +
           '<input id="shareEntry" placeholder="https://example.com/sp/" value="' + attr(state.meta.shareUrl || '') + '" />' +
-          '<span class="hint">留空则用当前页面地址；本地文件打开时海报不显示二维码。</span>' +
+          '<span class="hint">默认关闭；开启后才会印到图上。留空则用当前页面地址，本地文件打开时不生成。</span>' +
         '</div>' +
       '</div>' +
       '<div class="share-actions">' +
@@ -2801,7 +2803,7 @@
     const subs = lineup.filter((o) => String(o.substitute || '').trim()).slice(0, 3)
       .map((o) => '<div class="sc-sub-row"><b>' + esc(o.name) + '</b><span>' + esc(o.substitute) + '</span></div>').join('');
     const entry = siteUrl();
-    const qr = entry ? qrDataUrl(entry, 190) : '';
+    const qr = state.meta.showQr && entry ? qrDataUrl(entry, 190) : '';
     return '<div class="sc-hazard"></div>' +
       '<div class="sc-head">' +
         '<div class="sc-kicker"><b>' + esc(m.version) + '</b><span>卫戍协议 · 规程</span><span>' + esc(m.date) + '</span></div>' +
@@ -3185,6 +3187,13 @@
   });
 
   document.addEventListener('change', (e) => {
+    if (e.target.id === 'shareQrToggle') {
+      state.meta.showQr = !!e.target.checked;
+      saveNow();
+      renderPoster();
+      toast(state.meta.showQr ? '已开启：海报表头会印二维码' : '已关闭：海报不印二维码');
+      return;
+    }
     if (e.target.id === 'rosterCost') { rosterFilter.cost = e.target.value; renderRosterFilters(); filterRoster(); }
     if (e.target.id === 'rosterBond') { rosterFilter.bond = e.target.value; renderRosterFilters(); filterRoster(); }
   });

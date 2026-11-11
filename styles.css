@@ -1053,6 +1053,8 @@ body.editing .zoom-hint, body.modal-open .zoom-hint { display: none; }
 .share-link input:focus { border-color: var(--cyan); }
 .share-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
 .share-cap { margin-top: 6px; color: var(--faint); font-size: 11px; line-height: 1.6; }
+.share-toggle { display: flex; align-items: center; gap: 8px; margin: 2px 0 8px; color: var(--ink-soft); font-size: 13px; line-height: 1.5; cursor: pointer; }
+.share-toggle input { width: 16px; height: 16px; margin: 0; accent-color: var(--lime); }
 
 /* ---- help modal ---- */
 .help-steps { display: grid; gap: 10px; margin-top: 14px; }

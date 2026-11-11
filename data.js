@@ -50,7 +50,8 @@
     "proof": "实测 400+ 层",
     "boardNote": "核心 3 人不建议替，其余先顶位保 3 谢",
     "credit": "",
-    "shareUrl": ""
+    "shareUrl": "",
+    "showQr": false
   },
   "coreOperators": [
     {
