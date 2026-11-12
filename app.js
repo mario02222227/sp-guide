@@ -702,9 +702,18 @@
   function operatorSort(a, b) {
     return (Number(a.bench) - Number(b.bench)) || (tierNumber(a) - tierNumber(b)) || a.name.localeCompare(b.name, 'zh');
   }
+  // 每个勾选的筛选条件单独成一个分区：选「谢拉格 + 炎」就分别列两段，
+  // 不再把所有命中项揉进一个「筛选结果」列表。
   function buildMatchGroups(ops, selected) {
-    const matched = selected.length ? ops.filter((o) => selected.some((x) => x.test(o))) : ops.slice();
-    return [{ key: 'all', matched: selected, label: selected.length ? '筛选结果' : '全部干员', ops: matched }];
+    if (!selected.length) return [{ key: 'all', label: '全部干员', ops: ops.slice() }];
+    return selected
+      .map((sel, i) => ({ key: 'f' + i, label: sel.label, ops: ops.filter((o) => sel.test(o)) }))
+      .filter((g) => g.ops.length);
+  }
+  function uniqueOps(groups) {
+    const seen = new Set();
+    for (const g of groups) for (const o of g.ops) seen.add(o.id);
+    return seen.size;
   }
 
   function currentBondEntries() {
@@ -788,8 +797,6 @@
         '<div class="header-rule" aria-hidden="true"></div>' +
         '<div class="header-meta">' +
           '<span class="header-ru">РЕГЛАМЕНТ</span>' +
-          '<span class="header-sub" data-edit="meta.subtitle" data-max="16">' + esc(m.subtitle) + '</span>' +
-          (String(m.proof || '').trim() ? '<span class="header-proof" data-edit="meta.proof" data-max="20">' + esc(m.proof) + '</span>' : '') +
         '</div>' +
         stamp +
       '</div>' +
@@ -932,7 +939,10 @@
     const list = (ids || []).map((id, slot) => {
       const o = op(id);
       if (!o) return '';
-      return '<span class="stage-avatar" data-stage-index="' + stageIndex + '" data-stage-kind="' + kind + '" data-stage-slot="' + slot + '" data-op-id="' + attr(o.id) + '" role="button" tabindex="0" aria-label="' + attr(o.name) + '" title="' + attr(o.name) + '" style="--rarity:' + rarityColor(o) + '"><img src="' + avatarSrc(o.avatar) + '" alt="" draggable="false" /></span>';
+      const remove = editMode
+        ? '<button class="stage-remove edit-only" type="button" data-stage-remove="' + stageIndex + '" data-stage-slot="' + slot + '" title="从该阶段移除" aria-label="' + attr('从该阶段移除 ' + o.name) + '">×</button>'
+        : '';
+      return '<span class="stage-avatar" data-stage-index="' + stageIndex + '" data-stage-kind="' + kind + '" data-stage-slot="' + slot + '" data-op-id="' + attr(o.id) + '" role="button" tabindex="0" aria-label="' + attr(o.name) + '" title="' + attr(o.name) + '" style="--rarity:' + rarityColor(o) + '"><img src="' + avatarSrc(o.avatar) + '" alt="" draggable="false" />' + remove + '</span>';
     }).join('');
     const add = editMode && (ids || []).length < 9
       ? '<button class="stage-add edit-only" type="button" data-stage-add data-stage-index="' + stageIndex + '" data-stage-kind="' + kind + '" title="添加干员">+</button>'
@@ -1092,7 +1102,7 @@
         '<div class="info-pop-meta">HP ' + esc(s.initialHp ?? '—') + ' · ' + strategyKind(s) + ' · 解锁：' + esc(s.unlock || '无') + '</div></div>' +
       '</div>' +
       '<p class="strategy-effect info-pop-text">' + rich(s.effect || '') + '</p>' +
-      (s.source ? '<p class="detail-note">来源：<a href="' + attr(s.source) + '" target="_blank" rel="noreferrer">' + esc(s.sourceName || '来源') + '</a></p>' : '');
+      (s.source ? '<p class="source-note">来源：<a href="' + attr(s.source) + '" target="_blank" rel="noreferrer">' + esc(s.sourceName || '来源') + '</a></p>' : '');
     // 手机端屏幕窄，完整策略效果放在全屏卡片里读；桌面端仍用轻量浮层。
     if (mobileUI) openModal('<div class="modal-body">' + html + '</div>');
     else openInfoPop(anchor || null, html);
@@ -1113,7 +1123,7 @@
       '<p class="strategy-picker-unlock">' + (s.unlock ? '解锁：' + esc(s.unlock) : '解锁：无') + '</p>' +
       '<div class="strategy-picker-full"><h4>完整效果</h4><p>' + rich(s.effect || '') + '</p></div>' +
       '<button class="btn btn-primary strategy-picker-choose" type="button" data-strategy-choose="' + attr(s.id) + '"' + (disabled ? ' disabled' : '') + '>' + esc(label) + '</button>' +
-      (s.source ? '<p class="detail-note">来源：<a href="' + attr(s.source) + '" target="_blank" rel="noreferrer">' + esc(s.sourceName || '来源') + '</a></p>' : '');
+      (s.source ? '<p class="source-note">来源：<a href="' + attr(s.source) + '" target="_blank" rel="noreferrer">' + esc(s.sourceName || '来源') + '</a></p>' : '');
   }
   function renderStrategyPickerDetail() {
     const box = $('#strategyPickerDetail');
@@ -2066,13 +2076,6 @@
     // 很多单档盟约的 summary 和 effects[0].text 是同一句，别在浮层里显示两遍。
     const summaryDup = effects.some((e) => String(e.text || '').trim() === summaryText);
     const summaryHtml = summaryText && !summaryDup ? '<p class="info-pop-text">' + linkedRich(b.summary) + '</p>' : '';
-    const playHtml = (b.play || editMode)
-      ? '<div class="info-pop-play"><b>本套怎么用</b>' +
-        (editMode
-          ? '<span class="bond-play-text" contenteditable="true" data-bond-play="' + attr(id) + '">' + esc(b.play || '') + '</span>'
-          : '<span>' + linkedRich(b.play || '暂无') + '</span>') +
-        '</div>'
-      : '';
     return '<div class="info-pop-head">' +
         '<img src="' + bondIcon(id) + '" alt="" draggable="false" />' +
         '<div><div class="detail-kicker">BOND / ' + esc(b.tag || '') + '</div><h3>' + esc(b.name) + '</h3>' +
@@ -2080,8 +2083,7 @@
       '</div>' +
       summaryHtml +
       tiers +
-      bondOpsSectionHtml(id) +
-      playHtml;
+      bondOpsSectionHtml(id);
   }
 
   function openBond(id, anchor) {
@@ -2661,7 +2663,6 @@
     const effectText = (b.effects || []).map((e) => e.need + '：' + e.text).join('\n') || b.summary || '';
     return '<span class="roster-bond' + (core ? ' core' : ' extra') + '" title="' + attr((core ? '核心盟约' : '附加盟约') + '：' + b.name + (effectText ? '\n' + effectText : '')) + '">' +
       '<img src="' + attr(bondIcon(id)) + '" alt="" draggable="false" />' +
-      '<em>' + (core ? '核心' : '附加') + '</em>' +
       '<span class="roster-bond-name">' + esc(b.name) + '</span>' +
     '</span>';
   }
@@ -2709,11 +2710,11 @@
           '<div class="roster-group-items">' + g.ops.map(rosterItemHtml).join('') + '</div>' +
         '</section>').join('');
     }
-    const total = groups.reduce((n, g) => n + g.ops.length, 0);
+    const unique = uniqueOps(groups);
     const count = $('#rosterCount');
     if (count) count.textContent = selected.length
-      ? '筛选结果 ' + total + ' 位干员 · 全库 ' + choices.ops.length + ' 位'
-      : '全部 ' + total + ' 位干员 · 全库 ' + choices.ops.length + ' 位';
+      ? '筛选结果 ' + unique + ' 位干员 · ' + groups.length + ' 个分区 · 全库 ' + choices.ops.length + ' 位'
+      : '全部 ' + unique + ' 位干员 · 全库 ' + choices.ops.length + ' 位';
   }
 
   function filterRoster() {
@@ -4020,7 +4021,7 @@
           '<div class="mr-sheet-grid">' + g.ops.map((o) => mobileRosterItemHtml(o, placed)).join('') + '</div>' +
         '</section>').join('');
     }
-    const total = groups.reduce((n, g) => n + g.ops.length, 0);
+    const total = uniqueOps(groups);
     const active = !!q || selected.length > 0;
     const count = $('#mrSheetCount');
     if (count) count.textContent = active ? '筛选结果 ' + total + ' 位干员' : '全部 ' + total + ' 位干员';
@@ -4280,9 +4281,9 @@
     const proof = String(m.proof || '').trim();
     const titleHtml = '<section class="mr-hero">' +
       '<div class="mr-kicker"><span class="mr-kicker-ru">РЕГЛАМЕНТ</span><span class="mr-kicker-cn">卫戍协议 · 规程</span></div>' +
-      '<h1 class="mr-title"' + mobileEditAttrs('meta.title', 24, '点此写标题') + '>' + esc(m.title || '未命名阵容') + '</h1>' +
-      '<p class="mr-subtitle"' + mobileEditAttrs('meta.subtitle', 16, '点此写副标题') + '>' + esc(m.subtitle || '') + '</p>' +
-      ((proof || editing) ? '<p class="mr-proof"' + mobileEditAttrs('meta.proof', 20, '点此写实测证明') + '>' + esc(proof) + '</p>' : '') +
+      '<h1 class="mr-title"' + mobileEditAttrs('meta.title', 24, '填写标题') + '>' + esc(m.title || '未命名阵容') + '</h1>' +
+      '<p class="mr-subtitle"' + mobileEditAttrs('meta.subtitle', 16, '填写副标题') + '>' + esc(m.subtitle || '') + '</p>' +
+      ((proof || editing) ? '<p class="mr-proof"' + mobileEditAttrs('meta.proof', 20, '填写实测说明') + '>' + esc(proof) + '</p>' : '') +
     '</section>';
 
     /* 2. core operators — horizontal scroll */
@@ -4330,7 +4331,7 @@
     const boardNote = String(state.meta?.boardNote || '').trim();
     const boardNoteHtml = (boardNote || editing)
       ? '<div class="mr-board-note"><span class="mr-board-note-label">缺卡</span><span class="mr-board-note-text"' +
-          (editing ? mobileEditAttrs('meta.boardNote', 46, '点此写：核心 3 人不建议替…') : '') + '>' + esc(boardNote) + '</span></div>'
+          (editing ? mobileEditAttrs('meta.boardNote', 46, '填写缺卡说明') : '') + '>' + esc(boardNote) + '</span></div>'
       : '';
     const boardHtml = '<section class="mr-section mr-board-section">' +
       '<div class="mr-sec-head"><h2 class="mr-sec-title">站位</h2><span class="mr-sec-note">' + cols + ' × ' + rows + ' · 箭头=朝向</span></div>' +
@@ -4363,7 +4364,7 @@
             (editing ? '<button class="mr-stage-edit" type="button" data-mr-note-focus="' + i + '" aria-label="编辑 ' + attr(s.label || '') + ' 阶段备注">改备注</button>' : '') +
           '</span></div>' +
         opsHtml +
-        ((note || editing) ? '<p class="mr-stage-note"' + mobileEditAttrs('stages.' + i + '.note', noteMax, '点此写阶段备注') + '>' + esc(note) + '</p>' : '') +
+        ((note || editing) ? '<p class="mr-stage-note"' + mobileEditAttrs('stages.' + i + '.note', noteMax, '填写本阶段要点') + '>' + esc(note) + '</p>' : '') +
       '</article>';
     }).join('') : '<p class="mr-empty">还没有阶段数据。</p>';
 
@@ -4452,7 +4453,7 @@
     const strategyHtml = '<section class="mr-section">' +
       '<div class="mr-sec-head"><h2 class="mr-sec-title">盟约策略</h2><span class="mr-sec-note">' + (main ? '主盟约' + (alts.length ? ' + ' + alts.length + ' 次选' : '') : '未选择') + '</span></div>' +
       '<div class="mr-strategies">' + mainHtml + altHtml + addAlt + '</div>' +
-      ((reason || editing) ? '<div class="mr-reason"><b>为什么选它</b><p' + mobileEditAttrs('strategy.reason', 40, '点此写为什么选它') + '>' + esc(reason) + '</p></div>' : '') +
+      ((reason || editing) ? '<div class="mr-reason"><b>为什么选它</b><p' + mobileEditAttrs('strategy.reason', 40, '填写选择理由') + '>' + esc(reason) + '</p></div>' : '') +
     '</section>';
 
     /* 8. footer */
@@ -4693,9 +4694,8 @@
     const termOp = e.target.closest('[data-term-op]');
     if (termOp) {
       e.preventDefault();
-      const id = termOp.dataset.termOp;
-      closeInfoPop();
-      openDetail(id);
+      // 浮窗保持打开：点干员只是把详情抽屉拉到右边，收掉浮窗会让人丢了羁绊上下文。
+      openDetail(termOp.dataset.termOp);
       return;
     }
     if (e.target.closest('[data-close]')) { closeModal(); return; }
@@ -4878,6 +4878,11 @@
     const strategyFilter = e.target.closest('[data-strategy-filter]');
     if (strategyFilter) { strategyPickerFilter = strategyFilter.dataset.strategyFilter; refreshStrategyPicker(); return; }
 
+    const stageRemove = e.target.closest('[data-stage-remove]');
+    if (stageRemove) {
+      removeStageOperator(Number(stageRemove.dataset.stageRemove), Number(stageRemove.dataset.stageSlot));
+      return;
+    }
     const stageAvatar = e.target.closest('.stage-avatar');
     if (stageAvatar) {
       const i = Number(stageAvatar.dataset.stageIndex);

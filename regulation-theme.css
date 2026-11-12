@@ -94,22 +94,17 @@
   box-shadow: 8px 8px 0 rgba(0,0,0,.35);
 }
 .header-rule { background: repeating-linear-gradient(45deg, var(--gold) 0 10px, #0a0403 10px 20px); opacity: 1; }
-.header-sub { color: var(--cream); font-weight: 700; }
-.header-sub::before { content: "〔 "; color: var(--gold); }
-.header-sub::after  { content: " 〕"; color: var(--gold); }
 .header-ru {
   display: inline-flex; align-items: center; min-height: 26px; padding: 0 10px;
   background: #0a0403; color: var(--cream);
   font: 900 20px/1 var(--font-display); letter-spacing: .16em;
   border-left: 4px solid var(--gold);
 }
-.header-meta .header-proof { background: #0a0403; border-color: var(--gold); color: var(--gold); }
 
 /* QR 入口章 + 西里尔标签同时出现时，收紧间距，保证 180px 页头不溢出 */
 body.has-entry .header-left { padding-right: 214px; }
 body.has-entry .header-meta { gap: 8px; }
 body.has-entry .header-ru { letter-spacing: .12em; }
-body.has-entry .header-proof { padding: 0 7px; }
 body.has-entry .header-stamp { padding: 6px 9px 6px 6px; gap: 8px; }
 body.has-entry .header-stamp img { width: 66px; height: 66px; }
 body.has-entry .header-stamp-copy { font-size: 20px; gap: 3px; }

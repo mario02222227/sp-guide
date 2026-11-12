@@ -162,7 +162,6 @@ body.editing .stage { padding-top: 76px; padding-bottom: 0; }
   display: inline-grid; place-items: center; width: 34px; height: 34px;
   border: 1px solid var(--accent); color: var(--accent); font: 800 24px/1 var(--font-mono);
 }
-.header-sub { color: var(--faint); white-space: nowrap; }
 .header-ru { display: none; } /* 主题层 regulation-theme.css 会显示；删掉主题层即自动还原 */
 .header-title {
   margin-top: 8px; max-width: 860px;
@@ -537,6 +536,16 @@ body.detail-open .stage { padding-right: calc(var(--detail-w) + 16px); }
 .detail-equip img { width: 28px; height: 28px; object-fit: contain; }
 .detail-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line); }
 .detail-note { margin-top: 8px; color: var(--muted); font-size: 12px; line-height: 1.6; }
+/* 来源脚注：更小更灰 + 一条细线隔开，别让人当成盟约效果的一部分。
+   主题层会把 --faint 提亮成暖色，所以这里用固定低透明度，保证两种主题都够不起眼。 */
+.source-note {
+  margin-top: 10px; padding-top: 8px;
+  border-top: 1px solid rgba(120, 84, 66, .45);
+  color: rgba(233, 214, 196, .40);
+  font: 11px/1.6 var(--font-mono);
+}
+.source-note a { color: inherit; text-decoration: underline dotted; text-underline-offset: 2px; }
+.source-note a:hover { color: rgba(233, 214, 196, .68); }
 
 .map-layout { display: grid; grid-template-columns: 132px minmax(0,1fr); gap: 14px; align-items: start; margin-top: 12px; }
 .map-list { display: flex; flex-direction: column; gap: 4px; max-height: 70vh; overflow: auto; }
@@ -726,11 +735,10 @@ body.detail-open .stage { padding-right: calc(var(--detail-w) + 16px); }
   color: var(--ink-soft); font-size: 11px; line-height: 1; white-space: nowrap;
 }
 .roster-bond img { width: 13px; height: 13px; flex: 0 0 13px; object-fit: contain; opacity: .9; }
-.roster-bond em { font: 700 11px/1 var(--font-mono); font-style: normal; letter-spacing: .04em; color: var(--muted); }
 .roster-bond-name { overflow: hidden; text-overflow: ellipsis; }
+/* 核心盟约只用金色区分，不再额外加「核心」字样 */
 .roster-bond.core { border-color: rgba(var(--accent-rgb),.48); background: rgba(var(--accent-rgb),.09); color: var(--accent); }
 .roster-bond.core img { opacity: 1; }
-.roster-bond.core em { color: var(--accent); opacity: .85; }
 .roster-trait {
   margin-top: 4px; padding-bottom: 2px; color: var(--muted); font-size: 12px; line-height: 1.5;
   display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 4; overflow: hidden;
@@ -969,7 +977,6 @@ button.facing-chip:hover { border-color: var(--accent); color: var(--accent); }
 .module-type.big { width: 46px; height: 46px; flex-basis: 46px; font-size: 24px; }
 .bond-play-text { white-space: pre-line; }
 .bond-play-text[contenteditable="true"] { outline: 1px dashed rgba(var(--accent-rgb),.45); min-height: 28px; padding: 4px 6px; }
-.bond-play-text[contenteditable="true"]:empty::before { content: "点此编辑本套怎么用"; color: var(--faint); }
 .bond-play-text[contenteditable="true"]:focus { outline-color: var(--accent); }
 .bond-more { height: 40px; display: grid; place-items: center; color: var(--muted); font: 700 20px/1 var(--font-mono); border-top: 1px solid var(--line); }
 .pool-warn { position:absolute; left:2px; bottom:26px; z-index:4; padding:1px 3px; background:rgba(255,98,55,.92); color:#111; font:700 10px/1.2 var(--font-mono); pointer-events:none; }
@@ -983,13 +990,27 @@ button.facing-chip:hover { border-color: var(--accent); color: var(--accent); }
 .stage-row-label { width: 84px; flex: 0 0 84px; color: var(--steel); font-size: 20px; line-height: 20px; white-space: nowrap; }
 .stage-avatars { display: flex; align-items: center; gap: 4px; min-width: 0; overflow: hidden; flex: 1 1 auto; }
 .stage-avatars.drop-ok { outline: 2px dashed var(--accent); outline-offset: 2px; }
-.stage-avatar { width: 48px; height: 48px; flex: 0 0 48px; border: 2px solid var(--rarity, var(--accent)); background: #0a0605; overflow: hidden; cursor: pointer; }
+.stage-avatar { position: relative; width: 48px; height: 48px; flex: 0 0 48px; border: 2px solid var(--rarity, var(--accent)); background: #0a0605; overflow: hidden; cursor: pointer; }
 .stage-avatar img { width: 100%; height: 100%; object-fit: cover; object-position: top center; }
+.stage-remove {
+  display: none; position: absolute; top: 1px; right: 1px; z-index: 2;
+  width: 16px; height: 16px; padding: 0; place-items: center;
+  border: 1px solid rgba(255,77,58,.7); background: rgba(10,6,5,.92);
+  color: var(--red); font: 700 10px/1 var(--font-mono); cursor: pointer;
+}
+body.editing .stage-remove { display: grid; }
 .stage-add { width: 28px; height: 28px; flex: 0 0 28px; display: none; place-items: center; border: 1px dashed rgba(var(--accent-2-rgb),.45); background: transparent; color: var(--accent-2); font: 300 20px/1 var(--font-mono); cursor: pointer; }
 body.editing .stage-add { display: grid; }
 .stage-note { position: relative; flex: 0 0 auto; min-height: 44px; display: flex; align-items: flex-start; margin-top: 4px; padding: 6px 8px; border: 1px solid rgba(240,90,60,.38); background: rgba(0,0,0,.26); color: var(--orange); font-size: 20px; line-height: 24px; letter-spacing: 0; white-space: normal; overflow: hidden; }
 .stage-note-text { display: block; width: 100%; overflow: hidden; }
-body.editing .stage-note-text:empty::before { content: "点此写：升 3 本抓灵知…"; color: var(--faint); }
+/* 空字段提示：一直是「提示」而不是内容 —— 淡色 + 斜体 + 加号前缀，
+   免得被当成已经写进去的字，反复去删。 */
+body.editing .stage-note-text:empty::before {
+  content: "＋ 填写本阶段要点";
+  color: rgba(233, 214, 196, .38);
+  font-style: italic;
+}
+body.editing .stage-note-text:empty { outline: 1px dashed rgba(var(--accent-rgb),.22); outline-offset: 2px; }
 .stage-tools { position: absolute; right: 4px; bottom: 4px; height: auto; display: flex; gap: 4px; align-items: center; justify-content: flex-end; }
 .stage-fill, .stage-restore { display: none; border: 1px solid rgba(var(--accent-2-rgb),.5); background: transparent; color: var(--accent-2); font: 20px/1 var(--font-mono); padding: 2px 6px; cursor: pointer; }
 body.editing .stage-fill, body.editing .stage-restore { display: inline-flex; }
@@ -1157,15 +1178,10 @@ body.editing .board-unit, body.editing .roster-item { touch-action: none; }
    SPREAD: QR ENTRY / SHARE / ZOOM / POSTER CARD
    ============================================================ */
 
-/* ---- header meta line (version / subtitle / proof) ---- */
+/* ---- header meta line (regulation label only; subtitle/proof removed) ---- */
 .header-meta {
   display: flex; align-items: center; flex-wrap: wrap; gap: 12px;
   margin-top: 14px; font: 20px/1 var(--font-mono); letter-spacing: .05em; color: var(--muted);
-}
-.header-meta .header-proof {
-  display: inline-flex; align-items: center; min-height: 26px; padding: 0 9px;
-  border: 1px solid rgba(var(--accent-rgb),.36); background: rgba(var(--accent-rgb),.08);
-  color: var(--accent); font-size: 20px; line-height: 1; white-space: nowrap;
 }
 
 /* ---- header entry stamp (QR) ---- */
@@ -1860,7 +1876,6 @@ body.mobile-ui.editing .mr-stage-note[data-edit]:focus {
 }
 .mr-sheet-op .roster-bond { height: 24px; padding: 0 6px 0 4px; font-size: 12px; }
 .mr-sheet-op .roster-bond img { width: 15px; height: 15px; flex-basis: 15px; border: 0; }
-.mr-sheet-op .roster-bond em { font-size: 11px; }
 .mr-sheet-op .roster-trait {
   margin-top: 5px; padding-bottom: 2px; color: var(--ink-soft);
   font-size: 13px; line-height: 1.5; -webkit-line-clamp: 4;
@@ -1899,8 +1914,11 @@ body.mobile-ui.editing [data-edit]:focus {
   background: rgba(var(--accent-rgb),.07);
 }
 [data-edit][data-placeholder]:empty::before {
-  content: attr(data-placeholder); color: var(--faint);
+  content: "＋ " attr(data-placeholder);
+  color: rgba(233, 214, 196, .38);
+  font-style: italic;
 }
+[data-edit][data-placeholder]:empty { outline: 1px dashed rgba(var(--accent-rgb),.22); outline-offset: 2px; }
 
 /* ---- floating "阅读版" entry while the poster view is active ---- */
 .read-btn { display: none; left: 14px; right: auto; }
@@ -2128,8 +2146,10 @@ body.mobile-ui .equip-detail-modal { margin-top: 8px; }
 }
 .info-pop-ops-head b { color: var(--accent); font: 700 12px/1.4 var(--font-mono); }
 .info-pop-ops-head span { color: var(--faint); font: 11px/1.4 var(--font-mono); }
+/* 固定列宽：之前用 minmax(62px,1fr)，干员少的羁绊只有两三列，
+   每列被拉满宽度，头像就会忽大忽小。 */
 .info-pop-ops-grid {
-  display: grid; grid-template-columns: repeat(auto-fill, minmax(62px, 1fr)); gap: 6px;
+  display: grid; grid-template-columns: repeat(auto-fill, 66px); justify-content: start; gap: 6px;
   max-height: 196px; overflow: auto; padding-right: 2px;
 }
 .info-pop-op {
@@ -2141,7 +2161,7 @@ body.mobile-ui .equip-detail-modal { margin-top: 8px; }
   border-color: var(--accent); outline: 0; color: var(--cream, var(--ink));
 }
 .info-pop-op img {
-  width: 100%; aspect-ratio: 1; object-fit: cover; object-position: top center;
+  width: 58px; height: 58px; aspect-ratio: 1; object-fit: cover; object-position: top center;
   border: 2px solid var(--rarity, var(--line)); background: #0a0605;
 }
 .info-pop-op span {
