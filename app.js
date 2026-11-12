@@ -3879,7 +3879,6 @@
     $$('.mr-cell.mr-range, .mr-cell.mr-range-origin').forEach((el) => el.classList.remove('mr-range', 'mr-range-origin'));
     const note = $('#mrRangeNote');
     if (!mobileRange) {
-      $$('.mr-cell-remove').forEach((el) => el.remove());
       if (note) { note.hidden = true; note.textContent = ''; }
       return;
     }
@@ -4120,7 +4119,10 @@
       '</div>' +
       '<div class="mr-piece-sub">技能</div>' +
       '<div class="mr-piece-skills">' + (skills || '<p class="mr-note">资料库未收录技能。</p>') + '</div>' +
-      '<div class="mr-piece-actions"><button class="mr-action" type="button" data-op-id="' + attr(o.id) + '">完整详情</button></div>' +
+      '<div class="mr-piece-actions">' +
+        '<button class="mr-action" type="button" data-op-id="' + attr(o.id) + '">完整详情</button>' +
+        '<button class="mr-action danger" type="button" data-mr-remove="' + attr(o.id) + '">移出棋盘</button>' +
+      '</div>' +
     '</section>';
   }
 
@@ -4283,14 +4285,12 @@
         const o = p ? op(p.operatorId) : null;
         if (o) {
           const dir = normalizeFacing(p.facing);
-          const remove = editing && mobileRange?.operatorId === o.id
-            ? '<button class="mr-cell-remove" type="button" data-mr-remove="' + attr(o.id) + '" aria-label="移出棋盘">×</button>'
-            : '';
+          // 移除按钮不再放进格子：46px 格子里 20px 的 × 贴着中心点，
+          // 手指点「棋子中心换朝向」会被触摸补偿判成删除。改到下方信息面板。
           cells.push('<div class="mr-cell on" role="button" tabindex="0" data-op-id="' + attr(o.id) + '" data-row="' + r + '" data-col="' + c + '" style="--rarity:' + rarityColor(o) + '" aria-label="' + attr(o.name + '，朝向' + FACING_LABEL[dir] + '，技能 ' + skillNumeral(o.skillIdx)) + '">' +
             '<img src="' + avatarSrc(o.avatar) + '" alt="' + attr(o.name) + '" draggable="false" />' +
             '<span class="mr-facing" aria-hidden="true">' + facingArrow(dir) + '</span>' +
             '<span class="mr-cell-skill" aria-hidden="true">' + skillNumeral(o.skillIdx) + '</span>' +
-            remove +
           '</div>');
         } else {
           const placeable = editing && selectedRosterId ? ' mr-placeable' : '';
@@ -4308,7 +4308,7 @@
       : '';
     const boardHtml = '<section class="mr-section mr-board-section">' +
       '<div class="mr-sec-head"><h2 class="mr-sec-title">站位</h2><span class="mr-sec-note">' + cols + ' × ' + rows + ' · 箭头=朝向</span></div>' +
-      '<p class="mr-note">' + (editing ? '点「选人」看详情 → 点「放置到棋盘」→ 点空格；点棋子先看范围/羁绊/特性/技能，再点换朝向（选中后有 × 移除）；拖棋子换位；点虚线文字可改。' : '点棋子看详情；本页只读，点「编辑」可摆站位。敌人从右来。') + '</p>' +
+      '<p class="mr-note">' + (editing ? '点「选人」看详情 → 点「放置到棋盘」→ 点空格；点棋子先看范围/羁绊/特性/技能，再点换朝向；拖棋子换位；移出棋盘在下方信息面板；点虚线文字可改。' : '点棋子看详情；本页只读，点「编辑」可摆站位。敌人从右来。') + '</p>' +
       '<div class="mr-board-wrap"><div class="mr-board" style="--cols:' + cols + '">' + cells.join('') + '</div></div>' +
       '<p class="mr-range-note" id="mrRangeNote" hidden></p>' +
       mobilePieceInfoHtml() +
