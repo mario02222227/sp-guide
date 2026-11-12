@@ -42,6 +42,8 @@
     </div>
   </main>
 
+  <section class="mobile-read" id="mobileRead" aria-label="手机阅读版"></section>
+
   <aside class="drawer drawer-left" id="rosterDrawer" hidden aria-label="干员库">
     <div class="drawer-head">
       <div><strong>干员库</strong><span>拖到棋盘，或双击看详情；点选后点格子</span></div>
@@ -89,6 +91,10 @@
 
   <div class="zoom-hint" id="zoomHint" hidden>海报在手机上会被缩小。<b>点右下角「放大」</b>按原尺寸查看，可拖动。</div>
   <div class="facing-coach" id="facingCoach" aria-live="polite"></div>
+  <button class="zoom-btn read-btn" id="readBtn" type="button" title="切换到手机竖屏阅读版">
+    <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><rect x="6" y="2.5" width="12" height="19" rx="2" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M9 7h6M9 11h6M9 15h3" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+    <span>阅读版</span>
+  </button>
   <button class="zoom-btn" id="zoomBtn" type="button" aria-pressed="false" title="放大看细节（也可双击海报）">
     <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
     <span>放大</span>
@@ -96,6 +102,73 @@
   <input id="importFile" type="file" accept="application/json,.json" hidden />
   <div id="modalRoot"></div>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <div id="bootError" role="alert" style="display:none; position:fixed; inset:0; z-index:99999; background:rgba(6,3,2,.9); align-items:center; justify-content:center; padding:18px;">
+    <div style="width:min(560px,100%); max-height:90vh; overflow:auto; padding:18px; background:#170d0a; border:1px solid #c43a2c; border-top:4px solid #f6b61e; color:#f2e3ce; font:14px/1.6 'Microsoft YaHei','PingFang SC',sans-serif; box-shadow:0 20px 60px #000;">
+      <div style="color:#f6b61e; font:700 12px/1.4 monospace; letter-spacing:.12em;">MOBILE LOAD ERROR</div>
+      <h2 style="margin:4px 0 8px; font-size:22px; line-height:1.2;">手机端加载出错了</h2>
+      <p id="bootErrorMsg" style="margin:0 0 8px; color:#ffb4a4; overflow-wrap:anywhere;"></p>
+      <pre id="bootErrorStack" style="margin:0 0 12px; max-height:34vh; overflow:auto; padding:8px; background:#0a0605; border:1px solid #4a2b24; color:#d8c8b4; font:12px/1.5 monospace; white-space:pre-wrap;"></pre>
+      <div style="display:flex; flex-wrap:wrap; gap:8px;">
+        <button id="bootReset" type="button" style="min-height:44px; padding:0 14px; border:1px solid #f6b61e; background:#f6b61e; color:#140a06; font:700 14px/1 'Microsoft YaHei','PingFang SC',sans-serif; cursor:pointer;">清空本机数据并重载</button>
+        <button id="bootPoster" type="button" style="min-height:44px; padding:0 12px; border:1px solid #8f8b66; background:transparent; color:#f1e6d0; font:700 14px/1 'Microsoft YaHei','PingFang SC',sans-serif; cursor:pointer;">先看海报版</button>
+        <button id="bootClose" type="button" style="min-height:44px; padding:0 12px; border:1px solid #4a2b24; background:transparent; color:#a38d7a; font:700 14px/1 'Microsoft YaHei','PingFang SC',sans-serif; cursor:pointer;">关闭</button>
+      </div>
+      <p style="margin:10px 0 0; color:#a38d7a; font-size:12px;">把上面这段文字截图发我即可定位；清空数据只影响本机草稿，不会改服务器文件。</p>
+    </div>
+  </div>
+  <script>
+    (function () {
+      var shown = false;
+      function show(msg, stack) {
+        if (shown) return;
+        shown = true;
+        var box = document.getElementById('bootError');
+        if (!box) return;
+        box.style.display = 'flex';
+        document.getElementById('bootErrorMsg').textContent = msg || '未知错误';
+        document.getElementById('bootErrorStack').textContent = String(stack || '').slice(0, 3000);
+      }
+      window.__spBootError = show;
+      window.addEventListener('error', function (e) {
+        if (e && (e.message || e.error)) show(e.message || String(e.error), e.error && e.error.stack);
+      });
+      window.addEventListener('unhandledrejection', function (e) {
+        var r = e.reason;
+        show('Promise: ' + ((r && r.message) || r), r && r.stack);
+      });
+      document.addEventListener('DOMContentLoaded', function () {
+        document.getElementById('bootReset').onclick = function () {
+          try {
+            localStorage.removeItem('sp-guide-poster-v2');
+            localStorage.removeItem('sp-view-mode-v1');
+          } catch (err) { /* ignore */ }
+          location.reload();
+        };
+        document.getElementById('bootPoster').onclick = function () {
+          document.body.classList.remove('mobile-ui');
+          var mr = document.getElementById('mobileRead');
+          if (mr) mr.style.display = 'none';
+          try { if (window.__posterDebug) window.__posterDebug.exitMobileUI(); } catch (err) { /* ignore */ }
+        };
+        document.getElementById('bootClose').onclick = function () {
+          document.getElementById('bootError').style.display = 'none';
+        };
+        setTimeout(function () {
+          var dbg = window.__posterDebug;
+          var mr = document.getElementById('mobileRead');
+          if (!dbg) {
+            show('app.js 未启动（可能是脚本加载失败、缓存不完整或语法错误）');
+          } else if (document.body.classList.contains('mobile-ui') && mr) {
+            var cs = getComputedStyle(mr);
+            if (!mr.children.length || cs.display === 'none' || mr.getBoundingClientRect().height < 40) {
+              show('手机阅读版不可见（可能是样式缓存不完整或本机存档数据异常）');
+            }
+          }
+        }, 20000);
+      });
+    })();
+  </script>
 
   <script src="vendor/html-to-image.js"></script>
   <script src="vendor/lz-string.min.js"></script>

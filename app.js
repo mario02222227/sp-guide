@@ -8,6 +8,7 @@
   const STORAGE_KEY = 'sp-guide-poster-v2';
   const OLD_STORAGE_KEY = 'sp-guide-03-v1';
   const SAVES_KEY = 'sp-guide-poster-saves-v1';
+  const VIEW_MODE_KEY = 'sp-view-mode-v1';
   const SCHEMA_VERSION = 3;
   const DEFAULT_DATA = window.GUIDE_DATA;
   const ASSETS = window.ASSET_DATA || {};
@@ -46,8 +47,21 @@
   let editMode = false;
   let pendingToast = '';
   let saveTimer = 0;
+  /* Mobile reading view. `renderMobile` is a no-op until the view module below
+     is initialised; renderPoster() calls it so every mutator repaints both views. */
+  let mobileUI = false;
+  let renderMobile = () => {};
+  let mobileRosterOpen = false;
+  let mobileRosterQuery = '';
+  let mobileDrag = null;
+  let mobileRange = null;
+  let mobileRangeArmed = false;
+  let mobileBondOpen = '';
+  let mobileEquipOpen = null;
+  let mobileFilterOpen = true;
+  let mobileFilter = { prof: new Set(), rarity: new Set(), trigger: new Set(), bond: new Set() };
   let selectedRosterId = null;
-  let rosterFilter = { q: '', prof: new Set(), rarity: new Set(), trigger: new Set(), cost: 'all', bond: 'all' };
+  let rosterFilter = { q: '', prof: new Set(), rarity: new Set(), trigger: new Set(), bond: 'all' };
   const TRIGGER_DEFS = [
     { id: 'battle', label: '战斗中', re: /战斗中/ },
     { id: 'obtain', label: '获得时', re: /获得时/ },
@@ -61,6 +75,11 @@
     { id: 'knock', label: '被击倒时', re: /被击倒/ },
     { id: 'damage', label: '造成伤害时', re: /造成伤害时/ },
     { id: 'buy', label: '购买相关', re: /购买/ }
+  ];
+  const BOND_FILTER_ORDER = [
+    'yan', 'kjerag', 'arcane', 'precision', 'swift', 'skillful', 'steadfast', 'empty',
+    'doc', 'miracle', 'invest', 'mani', 'victoria', 'kazimierz', 'lethania',
+    'visi', 'siracusa', 'egir', 'sargon', 'solo', 'iberia', 'indom', 'deputy', 'ursus', 'raid'
   ];
   const operatorTraitText = (o) => [o?.trait, o?.eliteTrait].filter(Boolean).join('\n');
   const operatorTriggers = (o) => TRIGGER_DEFS.filter((t) => t.re.test(operatorTraitText(o))).map((t) => t.id);
@@ -541,7 +560,16 @@
 
   function migrate(raw) { return migrateToV3(raw); }
 
-  let state = loadState();
+  let state = (() => {
+    try {
+      if (new URLSearchParams(location.search).has('reset')) {
+        localStorage.removeItem(STORAGE_KEY);
+        localStorage.removeItem(VIEW_MODE_KEY);
+        history.replaceState(null, '', location.pathname);
+      }
+    } catch (e) { /* file:// 或隐私模式 */ }
+    return loadState();
+  })();
   let saves = readSaves();
 
   const op = (id) => {
@@ -553,6 +581,59 @@
   };
   const hasOperator = (id) => !!(id && state.operators?.[id]);
   const bond = (id) => state.bondLibrary?.[id] || null;
+  function operatorMatchesQuery(o, q) {
+    if (!q) return true;
+    const py = window.OP_PINYIN?.[o.name] || {};
+    return String(o.name || '').toLowerCase().includes(q) ||
+      String(py.full || '').toLowerCase().includes(q) ||
+      String(py.initials || '').toLowerCase().includes(q);
+  }
+  function operatorSort(a, b) {
+    return (Number(a.bench) - Number(b.bench)) || a.name.localeCompare(b.name, 'zh');
+  }
+  function matchGroupLabel(matched, total) {
+    const labels = matched.map((x) => x.label);
+    if (total === 1) return '命中 ' + labels[0];
+    if (matched.length === total) return '同时命中 ' + labels.join(' + ');
+    if (matched.length === 1) return '只命中 ' + labels[0];
+    return '命中 ' + labels.join(' + ');
+  }
+  function compareMatchSets(a, b) {
+    for (let i = 0; i < Math.min(a.length, b.length); i++) {
+      if (a[i].index !== b[i].index) return a[i].index - b[i].index;
+    }
+    return a.length - b.length;
+  }
+  function buildMatchGroups(ops, selected) {
+    if (!selected.length) return [{ key: 'all', matched: [], label: '全部干员', ops: ops.slice() }];
+    const map = new Map();
+    for (const o of ops) {
+      const matched = selected.filter((x) => x.test(o));
+      if (!matched.length) continue;
+      const key = matched.map((x) => x.index).join(',');
+      if (!map.has(key)) map.set(key, { key, matched, ops: [] });
+      map.get(key).ops.push(o);
+    }
+    const groups = [...map.values()];
+    groups.sort((a, b) => (b.matched.length - a.matched.length) || compareMatchSets(a.matched, b.matched));
+    for (const g of groups) g.label = matchGroupLabel(g.matched, selected.length);
+    return groups;
+  }
+
+  function currentBondEntries() {
+    const used = new Set();
+    for (const o of Object.values(state.operators || {})) {
+      for (const id of (o.bonds || [])) used.add(id);
+    }
+    const order = new Map(BOND_FILTER_ORDER.map((id, i) => [id, i]));
+    return Object.entries(state.bondLibrary || {})
+      .filter(([id]) => used.has(id))
+      .sort((a, b) => {
+        const ai = order.has(a[0]) ? order.get(a[0]) : 999;
+        const bi = order.has(b[0]) ? order.get(b[0]) : 999;
+        return (ai - bi) || a[1].name.localeCompare(b[1].name, 'zh');
+      });
+  }
   const item = (key) => ITEM_META[key] || key;
   const equipmentEffect = (key) => state.equipmentEffects?.[key] || DEFAULT_DATA.equipmentEffects?.[key] || null;
   const roleColor = (opData) => ROLE[opData?.roleKey] || ROLE.flex;
@@ -891,6 +972,7 @@
     const alts = (st.alternatives || []).map((id) => strategyById(id)).filter(Boolean).slice(0, 2);
     const lock = main.unlock ? '<span class="strategy-lock" title="解锁：' + attr(main.unlock) + '">锁</span>' : '';
     const mainEffect = strategyEffectHtml(main, st, 'main', alts.length);
+    const reason = String(st.reason || '');
     const altHtml = alts.length ? '<div class="strategy-secondaries count-' + alts.length + '">' + alts.map((s) => strategySecondaryCard(s, st, alts.length)).join('') + '</div>' : '';
     return '<section class="panel strategy-panel">' +
       '<div class="panel-head"><span class="panel-title">盟约策略</span>' +
@@ -904,7 +986,9 @@
           '</div>' +
         '</div>' +
         mainEffect.note + mainEffect.html + mainEffect.warning +
-        '<div class="strategy-reason"><span class="strategy-reason-text" data-edit="strategy.reason" data-max="40">' + esc(st.reason || '') + '</span><span class="edit-count">' + String((st.reason || '').length) + '/40</span></div>' +
+        ((reason || editMode)
+          ? '<div class="strategy-reason"><b class="strategy-reason-label">选择理由</b><span class="strategy-reason-text" data-edit="strategy.reason" data-max="40">' + esc(reason) + '</span><span class="edit-count">' + String(reason.length) + '/40</span></div>'
+          : '') +
       '</div>' +
       altHtml +
       (editMode ? '<button class="strategy-alt-add edit-only" type="button" data-strategy-alt-add>+ 次选</button>' : '') +
@@ -977,7 +1061,7 @@
     refreshStrategyPicker();
     const tabs = ['all','active','passive'].map((k) => '<button class="strategy-filter ' + (filter === k ? 'on' : '') + '" type="button" data-strategy-filter="' + k + '">' + ({all:'全部',active:'主动',passive:'被动'}[k]) + '</button>').join('');
     const body = '<div class="modal-body"><div class="detail-kicker">STRATEGY</div><h2 class="detail-name" style="font-size:28px">选择盟约策略</h2>' +
-      '<p class="detail-note">点左侧策略看完整效果，再点右侧按钮确认；最多 3 个策略。</p>' +
+      '<p class="detail-note">点策略看完整效果，再点确认按钮；最多 3 个策略。</p>' +
       '<div class="strategy-picker-layout">' +
         '<div class="strategy-picker-left">' +
           '<input class="strategy-search" id="strategySearch" placeholder="搜索策略名称 / 效果" value="' + attr(strategyPickerQuery) + '" />' +
@@ -1052,6 +1136,7 @@
       refreshPendingPreview();
       if (editMode) { bindBoardDnD(); bindStageDnD(); }
     });
+    if (mobileUI) renderMobile();
     if (MISSING_IDS.size && !missingToastShown) {
       missingToastShown = true;
       setTimeout(() => toast('有 ' + MISSING_IDS.size + ' 个干员不在当前资料库，已显示占位头像', true), 50);
@@ -1079,7 +1164,7 @@
   }
 
   function fitPoster() {
-    if (zoomMode) return;
+    if (zoomMode || mobileUI) return;
     const stage = $('#stage');
     const shell = $('#posterShell');
     const poster = $('#poster');
@@ -1220,10 +1305,13 @@
     if (!text) return '';
     return '<section class="detail-section"><h4>' + esc(label) + '</h4><p>' + esc(text) + '</p></section>';
   }
-  function bondMini(id) {
+  function bondMini(id, interactive = true) {
     const b = bond(id);
     if (!b) return '';
     const effectText = (b.effects || []).map((e) => e.need + '：' + e.text).join('\n') || b.summary || '';
+    if (!interactive) {
+      return '<span class="bond-mini static" title="' + attr(b.name + '\n' + effectText) + '"><img src="' + bondIcon(id) + '" alt="" />' + esc(b.name) + '</span>';
+    }
     return '<button class="bond-mini" type="button" data-bond-id="' + attr(id) + '" title="' + attr(b.name + '\n' + effectText) + '"><img src="' + bondIcon(id) + '" alt="" />' + esc(b.name) + '</button>';
   }
 
@@ -1257,11 +1345,11 @@
       toast('该干员不在当前资料库，使用占位头像', true);
       return;
     }
-    const bonds = (o.bonds || []).map(bondMini).join('');
+    const bonds = (o.bonds || []).map((bid) => bondMini(bid, !mobileUI)).join('');
     const st = o.stats || {};
     const stats = [
       ['生命', st.maxHp], ['攻击', st.atk], ['防御', st.def], ['法抗', st.res],
-      ['阻挡', st.blockCnt], ['攻速', st.aspd], ['部署费', st.cost], ['商店价', o.price]
+      ['阻挡', st.blockCnt], ['攻速', st.aspd], ['部署费', st.cost]
     ].map(([label, value]) => '<div class="stat"><span>' + esc(label) + '</span><b>' + esc(value ?? '—') + '</b></div>').join('');
     const skills = (o.skills || []).map((s, i) => {
       const on = i === Number(o.skillIdx || 0);
@@ -1293,23 +1381,30 @@
     const bondLines = (o.bonds || []).map((bid) => {
       const b = bond(bid); if (!b) return '';
       const eff = (b.effects || []).map((e) => '<span class="bond-tier-line"><b>激活 ' + esc(e.need) + '</b> ' + esc(e.text) + '</span>').join('');
-      return '<div class="detail-bond-row"><button class="bond-mini" type="button" data-bond-id="' + attr(bid) + '"><img src="' + bondIcon(bid) + '" alt="" />' + esc(b.name) + '</button>' + eff + '</div>';
+      return '<div class="detail-bond-row">' + bondMini(bid, !mobileUI) + eff + '</div>';
     }).join('');
     const talents = (o.talents || []).map((t) => '<div class="talent"><b>' + esc(t.name) + '</b><p>' + esc(t.desc) + '</p></div>').join('');
     const inCore = (state.coreOperators || []).some((c) => c.operatorId === o.id);
     const placed = (state.board?.placements || []).find((p) => p.operatorId === o.id);
     const rangeFacing = normalizeFacing(placed?.facing || 'up');
+    const mobilePlace = (mobileUI && editMode)
+      ? '<div class="detail-actions mr-detail-place"><button class="btn btn-primary mr-place-cta" type="button" data-mr-place-op="' + attr(o.id) + '">' +
+        '<span>放置到棋盘</span><i aria-hidden="true">→</i></button>' +
+        '<span class="detail-note">点这里 → 收起详情和干员库 → 点棋盘空格放置。</span></div>'
+      : '';
     const body = '<div class="modal-body">' +
       '<div class="detail-hero">' +
         '<img class="detail-avatar" src="' + avatarSrc(o.avatar) + '" alt="' + attr(o.name) + '" style="border-color:' + rarityColor(o) + '" />' +
         '<div><div class="detail-kicker">OPERATOR / ' + esc(o.profession || '') + '</div>' +
           '<h2 class="detail-name">' + esc(o.name) + '</h2>' +
           '<div class="detail-role" style="color:' + roleColor(o) + '">' + esc(o.profession || '') + ' · ' + esc(o.subProfession || '') + '</div>' +
-          '<div class="detail-meta"><span>' + esc(o.rarity || '') + '★</span><span>' + esc(o.profession || '') + '</span><span>' + esc(o.price ? o.price + ' 费' : '费用 —') + '</span><span>' + esc(String(o.attackKind).toLowerCase() === 'melee' ? '近战' : '远程') + '</span></div>' +
+          '<div class="detail-meta"><span>' + esc(o.rarity || '') + '★</span><span>' + esc(o.profession || '') + '</span>' +
+            '<span>' + esc(String(o.attackKind).toLowerCase() === 'melee' ? '近战' : '远程') + '</span></div>' +
           '<div class="detail-bonds">' + bonds + '</div>' +
           (editMode ? '<div class="detail-core"><button class="btn btn-small" type="button" data-core-op="' + attr(o.id) + '">' + (inCore ? '★ 移出右上角' : '☆ 加入右上角') + '</button><span class="detail-note">先放上棋盘再加入；右上角最多 6 人，不再自动收录。</span></div>' : '') +
         '</div>' +
       '</div>' +
+      mobilePlace +
       '<div class="detail-sections">' +
         '<section class="detail-section"><h4>基础数值</h4><div class="stat-grid">' + stats + '</div></section>' +
         traitHtml +
@@ -1320,7 +1415,7 @@
         '<section class="detail-section"><h4>羁绊档位</h4>' + (bondLines || '<p class="detail-note">暂无羁绊数据。</p>') + '</section>' +
         (talents ? '<section class="detail-section"><h4>天赋</h4><div class="talent-list">' + talents + '</div></section>' : '') +
       '</div>' +
-      '<p class="detail-note">拖动 / 数据来自本地资料库；羁绊可点击查看效果。</p>' +
+      '<p class="detail-note">' + (mobileUI ? '数据来自本地资料库；羁绊效果见上方「羁绊档位」。' : '拖动 / 数据来自本地资料库；羁绊可点击查看效果。') + '</p>' +
     '</div>';
     openModal(body);
   }
@@ -1756,7 +1851,7 @@
     toast('朝向：' + FACING_LABEL[normalizeFacing(dir)]);
   }
 
-  function placeRoster(id, row, col, facing = '', previewDir = '') {
+  function placeRoster(id, row, col, facing = '', previewDir = '', noPending = false) {
     if (!editMode || !hasOperator(id)) return;
     if (pendingPlacement) cancelPendingPlacement(true);
     const before = boardSnapshot();
@@ -1776,14 +1871,13 @@
       list.push({ operatorId: id, row, col, facing: dir });
     }
     syncLineup();
-    beginPendingPlacement(id, before, dir || previewDir);
+    if (!noPending) beginPendingPlacement(id, before, dir || previewDir);
+    clearRosterSelection();
     saveNow();
     renderPoster();
     renderRoster();
     renderVariants();
-    clearRosterSelection();
     if (op(id)?.inPool === false) toast('该干员不在当前规程池', true);
-    else toast('已放入 ' + op(id).name);
   }
 
   function removePlacement(id) {
@@ -1857,15 +1951,13 @@
     const ops = Object.values(state.operators || {});
     const profs = [...new Set(ops.map((o) => o.profession).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'zh'));
     const rarities = [...new Set(ops.map((o) => Number(o.rarity)).filter((n) => Number.isFinite(n) && n >= 1 && n <= 6))].sort((a, b) => b - a);
-    const costs = [...new Set(ops.map((o) => Number(o.price)).filter((n) => Number.isFinite(n) && n > 0))].sort((a, b) => a - b);
-    const bonds = Object.entries(state.bondLibrary || {}).sort((a, b) => a[1].name.localeCompare(b[1].name, 'zh'));
+    const bonds = currentBondEntries();
     const triggerCounts = TRIGGER_DEFS.map((t) => ({ ...t, count: ops.filter((o) => t.re.test(operatorTraitText(o))).length })).filter((t) => t.count > 0);
     const active = [];
     for (const p of rosterFilter.prof) active.push({ group: 'prof', value: p, label: p });
     for (const r of rosterFilter.rarity) active.push({ group: 'rarity', value: r, label: r + ' 星' });
     for (const t of rosterFilter.trigger) { const def = TRIGGER_DEFS.find((x) => x.id === t); if (def) active.push({ group: 'trigger', value: t, label: def.label }); }
     if (rosterFilter.bond !== 'all') active.push({ group: 'bond', value: rosterFilter.bond, label: state.bondLibrary?.[rosterFilter.bond]?.name || rosterFilter.bond });
-    if (rosterFilter.cost !== 'all') active.push({ group: 'cost', value: rosterFilter.cost, label: rosterFilter.cost + ' 费' });
     box.innerHTML =
       '<input class="roster-search" id="rosterSearch" placeholder="搜索干员 / 拼音" value="' + attr(rosterFilter.q) + '" />' +
       rosterFilterGroup('职业', rosterFilterChip('prof', 'all', '全部', rosterFilter.prof.size === 0) + profs.map((p) => rosterFilterChip('prof', p, p, rosterFilter.prof.has(p))).join('')) +
@@ -1873,53 +1965,79 @@
       rosterFilterGroup('触发', rosterFilterChip('trigger', 'all', '全部', rosterFilter.trigger.size === 0) + triggerCounts.map((t) => rosterFilterChip('trigger', t.id, t.label, rosterFilter.trigger.has(t.id))).join('')) +
       '<div class="roster-filter-row">' +
         '<select id="rosterBond" title="按盟约筛选"><option value="all">全部盟约</option>' + bonds.map(([id, b]) => '<option value="' + attr(id) + '"' + (rosterFilter.bond === id ? ' selected' : '') + '>' + esc(b.name) + '</option>').join('') + '</select>' +
-        '<select id="rosterCost" title="按费用筛选"><option value="all">全部费用</option>' + costs.map((t) => '<option value="' + t + '"' + (rosterFilter.cost === String(t) ? ' selected' : '') + '>' + t + ' 费</option>').join('') + '</select>' +
       '</div>' +
       '<div class="rf-active"><div class="rf-active-chips">' +
         (active.length ? active.map((a) => '<button class="rf-active-chip" type="button" data-rf-remove="' + a.group + '" data-rf-value="' + attr(a.value) + '">' + esc(a.label) + ' <b>×</b></button>').join('') : '<span class="rf-active-empty">未筛选</span>') +
       '</div><button class="rf-clear" type="button" data-rf-clear>清除全部</button></div>' +
       '<div class="rf-count" id="rosterCount"></div>';
   }
-  function filterRoster() {
+  function desktopFilterChoices() {
+    const ops = Object.values(state.operators || {});
+    const profs = [...new Set(ops.map((o) => o.profession).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'zh'));
+    const rarities = [...new Set(ops.map((o) => Number(o.rarity)).filter((n) => Number.isFinite(n) && n >= 1 && n <= 6))].sort((a, b) => b - a);
+    const triggers = TRIGGER_DEFS.filter((t) => ops.some((o) => t.re.test(operatorTraitText(o))));
+    const bonds = currentBondEntries();
+    return { ops, profs, rarities, triggers, bonds };
+  }
+
+  function desktopSelectedOptions(choices) {
+    const selected = [];
+    let index = 0;
+    const add = (label, test) => selected.push({ index: index++, label, test });
+    for (const p of choices.profs) if (rosterFilter.prof.has(p)) add(p, (o) => o.profession === p);
+    for (const n of choices.rarities) {
+      const value = String(n);
+      if (rosterFilter.rarity.has(value)) add(n + ' 星', (o) => String(o.rarity) === value);
+    }
+    for (const t of choices.triggers) if (rosterFilter.trigger.has(t.id)) add(t.label, (o) => operatorTriggers(o).includes(t.id));
+    if (rosterFilter.bond !== 'all') {
+      const bid = rosterFilter.bond;
+      add(state.bondLibrary?.[bid]?.name || bid, (o) => (o.bonds || []).includes(bid));
+    }
+    return selected;
+  }
+
+  function rosterItemHtml(o) {
+    const sk = skillOf(o);
+    return '<div class="roster-item' + (selectedRosterId === o.id ? ' selected' : '') + '" draggable="true" data-roster-id="' + attr(o.id) + '" data-name="' + attr(o.name) + '" data-prof="' + attr(o.profession || '') + '" data-rarity="' + attr(String(o.rarity ?? '')) + '" data-triggers="' + attr(operatorTriggers(o).join(',')) + '" data-tier="' + esc(o.tier) + '" data-bonds="' + attr((o.bonds || []).join(',')) + '" title="拖到棋盘放置；双击查看详情" style="--rarity:' + rarityColor(o) + '">' +
+      '<img class="roster-avatar" src="' + avatarSrc(o.avatar) + '" alt="' + attr(o.name) + '" draggable="false" />' +
+      '<div><div class="roster-name">' + esc(o.name) + '</div>' +
+        '<div class="roster-sub">' + esc(o.profession || '') + '</div>' +
+        '<div class="roster-loadout"><span class="loadout-item" title="' + attr(sk ? '技能 ' + skillNumeral(o.skillIdx) + '：' + sk.name : '未配置技能') + '"><img src="' + skillIcon(o) + '" alt="" draggable="false" /><b>' + skillNumeral(o.skillIdx) + '</b></span>' + moduleBadge(o) + '</div></div>' +
+      '<button class="roster-info" type="button" data-roster-detail="' + attr(o.id) + '" title="查看详情">i</button>' +
+    '</div>';
+  }
+
+  function renderRosterList() {
     const list = $('#rosterList');
     if (!list) return;
-    let visible = 0;
-    const q = rosterFilter.q.toLowerCase();
-    const total = $$('.roster-item', list).length;
-    $$('.roster-item', list).forEach((el) => {
-      const py = window.OP_PINYIN?.[el.dataset.name] || {};
-      const triggers = String(el.dataset.triggers || '').split(',').filter(Boolean);
-      const ok = (!q || el.dataset.name.toLowerCase().includes(q) || String(py.full || '').includes(q) || String(py.initials || '').includes(q))
-        && (rosterFilter.prof.size === 0 || rosterFilter.prof.has(el.dataset.prof))
-        && (rosterFilter.rarity.size === 0 || rosterFilter.rarity.has(el.dataset.rarity))
-        && (rosterFilter.trigger.size === 0 || triggers.some((t) => rosterFilter.trigger.has(t)))
-        && (rosterFilter.cost === 'all' || el.dataset.price === rosterFilter.cost)
-        && (rosterFilter.bond === 'all' || (el.dataset.bonds || '').split(',').includes(rosterFilter.bond));
-      el.hidden = !ok;
-      if (ok) visible++;
-    });
-    const empty = $('#rosterEmpty');
-    if (empty) empty.hidden = visible > 0;
+    const choices = desktopFilterChoices();
+    const q = String(rosterFilter.q || '').trim().toLowerCase();
+    const ops = choices.ops.filter((o) => operatorMatchesQuery(o, q));
+    const selected = desktopSelectedOptions(choices);
+    const groups = buildMatchGroups(ops, selected);
+    for (const g of groups) g.ops.sort(operatorSort);
+    if (!groups.length) {
+      list.innerHTML = '<div class="roster-empty">没有符合条件的干员</div>';
+    } else {
+      list.innerHTML = groups.map((g) =>
+        '<section class="roster-group"><div class="roster-group-head"><b>' + esc(g.label) + '</b><span>' + g.ops.length + ' 人</span></div>' +
+          '<div class="roster-group-items">' + g.ops.map(rosterItemHtml).join('') + '</div>' +
+        '</section>').join('');
+    }
+    const total = groups.reduce((n, g) => n + g.ops.length, 0);
     const count = $('#rosterCount');
-    if (count) count.textContent = '命中 ' + visible + ' 位干员 · 全库 ' + total + ' 位';
+    if (count) count.textContent = '命中 ' + total + ' 位干员 · 全库 ' + choices.ops.length + ' 位';
+  }
+
+  function filterRoster() {
+    renderRosterList();
   }
   function renderRoster() {
     const list = $('#rosterList');
     if (!list) return;
     renderRosterFilters();
-    const ops = Object.values(state.operators || {});
-    const sorted = ops.sort((a, b) => (Number(a.bench) - Number(b.bench)) || (Number(a.price) - Number(b.price)) || a.name.localeCompare(b.name, 'zh'));
-    list.innerHTML = sorted.map((o) => {
-      const sk = skillOf(o);
-      return '<div class="roster-item' + (selectedRosterId === o.id ? ' selected' : '') + '" draggable="true" data-roster-id="' + attr(o.id) + '" data-name="' + attr(o.name) + '" data-prof="' + attr(o.profession || '') + '" data-rarity="' + attr(String(o.rarity ?? '')) + '" data-triggers="' + attr(operatorTriggers(o).join(',')) + '" data-tier="' + esc(o.tier) + '" data-price="' + esc(o.price ?? '') + '" data-bonds="' + attr((o.bonds || []).join(',')) + '" title="拖到棋盘放置；双击查看详情" style="--rarity:' + rarityColor(o) + '">' +
-        '<img class="roster-avatar" src="' + avatarSrc(o.avatar) + '" alt="' + attr(o.name) + '" draggable="false" />' +
-        '<div><div class="roster-name">' + esc(o.name) + '</div>' +
-          '<div class="roster-sub">' + esc(o.profession || '') + ' · ' + (o.price ? esc(o.price) + ' 费' : '费用 —') + '</div>' +
-          '<div class="roster-loadout"><span class="loadout-item" title="' + attr(sk ? '技能 ' + skillNumeral(o.skillIdx) + '：' + sk.name : '未配置技能') + '"><img src="' + skillIcon(o) + '" alt="" draggable="false" /><b>' + skillNumeral(o.skillIdx) + '</b></span>' + moduleBadge(o) + '</div></div>' +
-        '<button class="roster-info" type="button" data-roster-detail="' + attr(o.id) + '" title="查看详情">i</button>' +
-      '</div>';
-    }).join('') + '<div class="roster-empty" id="rosterEmpty" hidden>没有符合条件的干员</div>';
-    filterRoster();
+    renderRosterList();
   }
 
   /* ------------------------------------------------------------
@@ -2110,11 +2228,11 @@
     stagePickerCtx = { stageIndex, kind, slot };
     const boardIds = [...(state.board?.placements || [])].sort((a, b) => (a.row - b.row) || (a.col - b.col)).map((p) => p.operatorId);
     const placed = new Set(boardIds);
-    const unplaced = Object.values(state.operators || {}).filter((o) => !placed.has(o.id)).sort((a, b) => (Number(b.bench) - Number(a.bench)) || (Number(a.price) - Number(b.price)) || a.name.localeCompare(b.name, 'zh'));
+    const unplaced = Object.values(state.operators || {}).filter((o) => !placed.has(o.id)).sort((a, b) => (Number(b.bench) - Number(a.bench)) || a.name.localeCompare(b.name, 'zh'));
     const btn = (o) => '<button class="stage-pick" type="button" data-stage-pick="' + attr(o.id) + '" title="' + attr(o.name) + '" style="--rarity:' + rarityColor(o) + '"><img src="' + avatarSrc(o.avatar) + '" alt="" draggable="false" /><span>' + esc(o.name) + '</span></button>';
     const boardHtml = boardIds.length ? boardIds.map((id) => op(id)).filter(Boolean).map(btn).join('') : '<div class="stage-pick-empty">棋盘上还没有干员</div>';
     const unplacedHtml = unplaced.length ? unplaced.map(btn).join('') : '<div class="stage-pick-empty">所有干员都已上场</div>';
-    const all = Object.values(state.operators || {}).sort((a, b) => (Number(a.price) - Number(b.price)) || a.name.localeCompare(b.name, 'zh'));
+    const all = Object.values(state.operators || {}).sort((a, b) => a.name.localeCompare(b.name, 'zh'));
     const allHtml = all.map(btn).join('');
     const title = kind === 'recruit' ? '抓取顺序' : '阵容';
     const body = '<div class="modal-body">' +
@@ -2391,7 +2509,7 @@
     toast('朝向：' + (FACING_LABEL[p.facing] || p.facing));
   }
 
-  function movePlacement(id, row, col, facing = '', previewDir = '') {
+  function movePlacement(id, row, col, facing = '', previewDir = '', noPending = false) {
     if (!hasOperator(id)) return;
     if (pendingPlacement) cancelPendingPlacement(true);
     const before = boardSnapshot();
@@ -2410,15 +2528,13 @@
     }
     state.board.placements = list;
     syncLineup();
-    if (editMode) beginPendingPlacement(id, before, dir || previewDir, from ? '移动' : '放入');
+    if (editMode && !noPending) beginPendingPlacement(id, before, dir || previewDir, from ? '移动' : '放入');
     saveNow();
     renderPoster();
     renderRoster();
     renderVariants();
     clearRosterSelection();
-    toast(editMode
-      ? (from ? '站位已更新：按住棋子拖动选择朝向；点其他地方撤销' : '已放入 ' + op(id).name + '：按住棋子拖动选择朝向；点其他地方撤销')
-      : '站位已更新');
+    if (!editMode) toast('站位已更新');
   }
 
 
@@ -2943,10 +3059,831 @@
   }
 
   /* ------------------------------------------------------------
+     Mobile reading view (portrait, read-only)
+     The poster stays mounted at 1600 × 1200 off-screen so layoutBoard(),
+     posterCheck() and html-to-image keep seeing real dimensions.
+     ------------------------------------------------------------ */
+  function isNarrowView() {
+    return !!(window.matchMedia && window.matchMedia('(max-width: 720px)').matches);
+  }
+  function storedViewMode() {
+    try { return localStorage.getItem(VIEW_MODE_KEY) || ''; } catch (e) { return ''; }
+  }
+  function storeViewMode(mode) {
+    try { localStorage.setItem(VIEW_MODE_KEY, mode); } catch (e) { /* private mode */ }
+  }
+  function enterMobileUI() {
+    if (mobileUI) return;
+    if (zoomMode) setZoomMode(false);
+    mobileUI = true;
+    document.body.classList.add('mobile-ui');
+    const poster = $('#poster');
+    const shell = $('#posterShell');
+    if (poster) poster.style.transform = 'none';
+    if (shell) { shell.style.width = '1600px'; shell.style.height = '1200px'; }
+    renderPoster();
+    const box = $('#mobileRead');
+    if (box) box.scrollTop = 0;
+  }
+  function exitMobileUI() {
+    if (!mobileUI) return;
+    if (editMode) setMobileEdit(false);
+    mobileUI = false;
+    document.body.classList.remove('mobile-ui');
+    fitPoster();
+    renderPoster();
+  }
+  function setViewMode(mode) {
+    const next = mode === 'poster' ? 'poster' : 'read';
+    storeViewMode(next);
+    if (next === 'read') {
+      enterMobileUI();
+    } else {
+      if (mobileUI && editMode) setMobileEdit(false);
+      exitMobileUI();
+    }
+  }
+  function initViewMode(forceRead) {
+    if (!isNarrowView()) { exitMobileUI(); return; }
+    if (forceRead) { enterMobileUI(); return; }
+    if (storedViewMode() === 'poster') { exitMobileUI(); return; }
+    enterMobileUI();
+  }
+
+  /* Mobile edit mode: the phone uses button placement instead of dragging
+     from the roster drawer, so scrolling the operator list never fights a
+     drag gesture. The same `editMode` flag drives desktop and mobile. */
+  function setMobileEdit(on) {
+    if (!mobileUI) return;
+    const next = !!on;
+    if (next === editMode) return;
+    if (pendingPlacement) cancelPendingPlacement(true);
+    editMode = next;
+    document.body.classList.toggle('editing', editMode);
+    mobileRosterOpen = false;
+    mobileRosterQuery = '';
+    mobileRange = null;
+    mobileRangeArmed = false;
+    mobileEquipOpen = null;
+    mobileBondOpen = '';
+    mobileFilterOpen = true;
+    resetMobileFilter();
+    cancelMobileDrag();
+    clearRosterSelection();
+    const bar = $('#editBar');
+    if (bar) bar.hidden = !editMode;
+    const btn = $('#editBtn');
+    if (btn) {
+      btn.setAttribute('aria-pressed', String(editMode));
+      const span = btn.querySelector('span');
+      if (span) span.textContent = editMode ? '完成' : '编辑';
+    }
+    saveNow();
+    renderPoster();
+    if (editMode) {
+      requestAnimationFrame(scrollMobileBoard);
+    } else {
+      toast('已退出手机编辑');
+    }
+  }
+
+  function cancelMobileDrag() {
+    if (mobileDrag?.cell) mobileDrag.cell.classList.remove('mr-drag-source');
+    document.body.classList.remove('mr-dragging');
+    $$('.mr-cell.mr-drop').forEach((el) => el.classList.remove('mr-drop'));
+    mobileDrag = null;
+  }
+
+  function scrollMobileBoard() {
+    const box = $('#mobileRead');
+    const section = $('.mr-board-section');
+    if (!box || !section) return;
+    const boxTop = box.getBoundingClientRect().top;
+    const target = box.scrollTop + section.getBoundingClientRect().top - boxTop - 64;
+    box.scrollTo({ top: Math.max(0, target), behavior: 'smooth' });
+  }
+
+  function clearMobileRangeDom() {
+    mobileRange = null;
+    mobileRangeArmed = false;
+    const info = $('#mrPieceInfo');
+    if (info) info.remove();
+    applyMobileRange();
+  }
+
+  function applyMobileRange() {
+    $$('.mr-cell.mr-range, .mr-cell.mr-range-origin').forEach((el) => el.classList.remove('mr-range', 'mr-range-origin'));
+    const note = $('#mrRangeNote');
+    if (!mobileRange) {
+      $$('.mr-cell-remove').forEach((el) => el.remove());
+      if (note) { note.hidden = true; note.textContent = ''; }
+      return;
+    }
+    const o = op(mobileRange.operatorId);
+    if (!o) { mobileRange = null; return; }
+    const placed = (state.board?.placements || []).find((p) => p.operatorId === o.id);
+    const row = placed ? Number(placed.row) : Number(mobileRange.row);
+    const col = placed ? Number(placed.col) : Number(mobileRange.col);
+    const dir = normalizeFacing(placed?.facing || 'right');
+    const grid = Array.isArray(o.rangeGrid) ? o.rangeGrid : [];
+    for (const [gx, gy] of grid) {
+      const [dc, dr] = rotateRangeCell(Number(gx), Number(gy), dir);
+      const target = $('.mr-cell[data-row="' + (row + dr) + '"][data-col="' + (col + dc) + '"]');
+      if (target) target.classList.add('mr-range');
+    }
+    const origin = $('.mr-cell[data-row="' + row + '"][data-col="' + col + '"]');
+    if (origin) origin.classList.add('mr-range-origin');
+    if (note) {
+      note.hidden = false;
+      note.textContent = '攻击范围 · ' + o.name + ' · 朝向 ' + (FACING_LABEL[dir] || dir) +
+        (grid.length ? ' · 再点棋子换朝向 · 点其他位置取消' : ' · 资料库未收录范围 · 再点棋子换朝向');
+    }
+  }
+
+  function selectMobileRoster(id, force = false) {
+    if (!editMode || !hasOperator(id)) return;
+    if (!force && selectedRosterId === id) {
+      selectedRosterId = null;
+      mobileRosterOpen = false;
+      mobileRosterQuery = '';
+      mobileRange = null;
+      mobileRangeArmed = false;
+      renderPoster();
+      toast('已取消选择');
+      return;
+    }
+    selectedRosterId = id;
+    mobileRosterOpen = false;
+    mobileRosterQuery = '';
+    mobileRange = null;
+    mobileRangeArmed = false;
+    renderPoster();
+    toast('已选中「' + (op(id)?.name || id) + '」：点棋盘空格放置');
+    requestAnimationFrame(scrollMobileBoard);
+  }
+
+  function resetMobileFilter() {
+    mobileFilter = { prof: new Set(), rarity: new Set(), trigger: new Set(), bond: new Set() };
+  }
+
+  function mobileFilterCount() {
+    return mobileFilter.prof.size + mobileFilter.rarity.size + mobileFilter.trigger.size +
+      mobileFilter.bond.size;
+  }
+
+  function updateMobileFilterLabel() {
+    const btn = $('[data-mr-filter-toggle]');
+    if (!btn) return;
+    const n = mobileFilterCount();
+    btn.textContent = (mobileFilterOpen ? '收起筛选' : '筛选') + (n ? '(' + n + ')' : '');
+    btn.classList.toggle('on', n > 0);
+  }
+
+  function mobileFilterChoices() {
+    const ops = Object.values(state.operators || {});
+    const profs = [...new Set(ops.map((o) => o.profession).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'zh'));
+    const rarities = [...new Set(ops.map((o) => Number(o.rarity)).filter((n) => Number.isFinite(n) && n >= 1 && n <= 6))].sort((a, b) => b - a);
+    const triggers = TRIGGER_DEFS.filter((t) => ops.some((o) => t.re.test(operatorTraitText(o))));
+    const bondEntries = currentBondEntries();
+    return { ops, profs, rarities, triggers, bondEntries };
+  }
+
+  function mobileSelectedOptions(choices) {
+    const selected = [];
+    let index = 0;
+    const add = (label, test) => selected.push({ index: index++, label, test });
+    for (const p of choices.profs) if (mobileFilter.prof.has(p)) add(p, (o) => o.profession === p);
+    for (const n of choices.rarities) {
+      const value = String(n);
+      if (mobileFilter.rarity.has(value)) add(n + ' 星', (o) => String(o.rarity) === value);
+    }
+    for (const t of choices.triggers) if (mobileFilter.trigger.has(t.id)) add(t.label, (o) => operatorTriggers(o).includes(t.id));
+    for (const [id, b] of choices.bondEntries) if (mobileFilter.bond.has(id)) add(b.name, (o) => (o.bonds || []).includes(id));
+    return selected;
+  }
+
+  function mobileRosterItemHtml(o, placed) {
+    return '<button class="mr-sheet-op' + (selectedRosterId === o.id ? ' on' : '') + (placed.has(o.id) ? ' placed' : '') +
+      '" type="button" data-mr-op-id="' + attr(o.id) + '" data-name="' + attr(o.name) + '" data-prof="' + attr(o.profession || '') +
+      '" data-rarity="' + attr(String(o.rarity ?? '')) + '" data-triggers="' + attr(operatorTriggers(o).join(',')) +
+      '" data-bonds="' + attr((o.bonds || []).join(',')) + '" style="--rarity:' + rarityColor(o) + '" title="' + attr(o.name + (placed.has(o.id) ? '（已在场上）' : '')) + '">' +
+      '<img src="' + avatarSrc(o.avatar) + '" alt="" draggable="false" />' +
+      '<span>' + esc(o.name) + '</span>' +
+    '</button>';
+  }
+
+  function renderMobileRosterGroups() {
+    const container = $('#mrRosterGroups');
+    if (!container) return;
+    const choices = mobileFilterChoices();
+    const selected = mobileSelectedOptions(choices);
+    const q = String(mobileRosterQuery || '').trim().toLowerCase();
+    const ops = choices.ops.filter((o) => operatorMatchesQuery(o, q));
+    const groups = buildMatchGroups(ops, selected);
+    for (const g of groups) g.ops.sort(operatorSort);
+    const placed = new Set((state.board?.placements || []).map((p) => p.operatorId));
+    if (!groups.length) {
+      container.innerHTML = '<p class="mr-empty">没有符合条件的干员</p>';
+    } else {
+      container.innerHTML = groups.map((g) =>
+        '<section class="mr-sheet-group"><div class="mr-sheet-group-head"><b>' + esc(g.label) + '</b><span>' + g.ops.length + ' 人</span></div>' +
+          '<div class="mr-sheet-grid">' + g.ops.map((o) => mobileRosterItemHtml(o, placed)).join('') + '</div>' +
+        '</section>').join('');
+    }
+    const total = groups.reduce((n, g) => n + g.ops.length, 0);
+    const active = !!q || selected.length > 0;
+    const count = $('#mrSheetCount');
+    if (count) count.textContent = active ? '命中 ' + total + ' 位干员' : '全部 ' + total + ' 位干员';
+    const summary = $('#mrFilterSummary');
+    if (summary) {
+      const parts = [];
+      if (mobileFilter.prof.size) parts.push('职业 ' + choices.profs.filter((p) => mobileFilter.prof.has(p)).join('/'));
+      if (mobileFilter.rarity.size) parts.push('星级 ' + choices.rarities.filter((n) => mobileFilter.rarity.has(String(n))).map((n) => n + ' 星').join('/'));
+      if (mobileFilter.trigger.size) parts.push('触发 ' + choices.triggers.filter((t) => mobileFilter.trigger.has(t.id)).map((t) => t.label).join('/'));
+      if (mobileFilter.bond.size) parts.push('盟约 ' + choices.bondEntries.filter(([id]) => mobileFilter.bond.has(id)).map(([, b]) => b.name).join('/'));
+      summary.textContent = parts.length ? '已选：' + parts.join(' · ') : '';
+      summary.hidden = !parts.length;
+    }
+    updateMobileFilterLabel();
+  }
+
+  function filterMobileRoster() {
+    renderMobileRosterGroups();
+  }
+
+  function mobileRosterSheetHtml() {
+    const { ops, profs, rarities, triggers, bondEntries } = mobileFilterChoices();
+    const chip = (group, value, label, on) =>
+      '<button class="mr-fchip' + (on ? ' on' : '') + '" type="button" data-mrf-group="' + group + '" data-mrf-value="' + attr(value) + '">' + esc(label) + '</button>';
+    const groupHtml = (label, group, items, allOn, itemOn) =>
+      '<div class="mr-filter-group"><span class="mr-filter-label">' + label + '</span><div class="mr-filter-chips">' +
+        chip(group, 'all', '全部', allOn) +
+        items.map(([value, text]) => chip(group, value, text, itemOn(value))).join('') +
+      '</div></div>';
+    const filterCount = mobileFilterCount();
+    const filters = mobileFilterOpen
+      ? '<div class="mr-filters">' +
+          groupHtml('职业', 'prof', profs.map((p) => [p, p]), mobileFilter.prof.size === 0, (v) => mobileFilter.prof.has(v)) +
+          groupHtml('星级', 'rarity', rarities.map((n) => [String(n), n + ' 星']), mobileFilter.rarity.size === 0, (v) => mobileFilter.rarity.has(v)) +
+          groupHtml('触发', 'trigger', triggers.map((t) => [t.id, t.label]), mobileFilter.trigger.size === 0, (v) => mobileFilter.trigger.has(v)) +
+          groupHtml('盟约', 'bond', bondEntries.map(([id, b]) => [id, b.name]), mobileFilter.bond.size === 0, (v) => mobileFilter.bond.has(v)) +
+          '<button class="mr-filter-reset" type="button" data-mrf-reset>重置筛选</button>' +
+        '</div>'
+      : '';
+    return '<div class="mr-sheet-backdrop" data-mr-sheet-close></div>' +
+      '<section class="mr-sheet' + (mobileFilterOpen ? ' with-filters' : '') + '" aria-label="手机干员库">' +
+        '<div class="mr-sheet-head"><b>干员库</b><span>点干员看详情；再点「放置到棋盘」</span>' +
+          '<button class="mr-sheet-close" type="button" data-mr-sheet-close aria-label="关闭干员库">×</button></div>' +
+        '<div class="mr-sheet-search-row">' +
+          '<input class="mr-sheet-search" id="mrRosterSearch" type="search" autocomplete="off" placeholder="搜索干员 / 拼音" value="' + attr(mobileRosterQuery) + '" />' +
+          '<button class="mr-sheet-filter-btn' + (filterCount ? ' on' : '') + '" type="button" data-mr-filter-toggle>' + (mobileFilterOpen ? '收起筛选' : '筛选') + (filterCount ? '(' + filterCount + ')' : '') + '</button>' +
+        '</div>' +
+        filters +
+        '<div class="mr-sheet-count" id="mrSheetCount">全部 ' + ops.length + ' 位干员</div>' +
+        '<div class="mr-filter-summary" id="mrFilterSummary" hidden></div>' +
+        '<div class="mr-sheet-groups" id="mrRosterGroups"></div>' +
+      '</section>';
+  }
+
+  function mobileBondDetailHtml(id, b) {
+    if (!b) return '';
+    const effects = (b.effects || []).map((e) =>
+      '<div class="mr-bond-effect"><b>激活 ' + esc(e.need) + '</b><span>' + esc(e.text) + '</span></div>').join('');
+    const seen = new Set();
+    const ops = [];
+    for (const p of [...(state.board?.placements || [])].sort((a, b2) => (a.row - b2.row) || (a.col - b2.col))) {
+      if (!p || seen.has(p.operatorId)) continue;
+      seen.add(p.operatorId);
+      const o = op(p.operatorId);
+      if (o && (o.bonds || []).includes(id)) ops.push(o);
+    }
+    const avatars = ops.map((o) =>
+      '<button class="mr-bond-op" type="button" data-op-id="' + attr(o.id) + '" title="' + attr(o.name) + '" aria-label="' + attr('查看 ' + o.name) + '" style="--rarity:' + rarityColor(o) + '">' +
+        '<img src="' + avatarSrc(o.avatar) + '" alt="' + attr(o.name) + '" draggable="false" />' +
+      '</button>').join('');
+    return '<div class="mr-bond-detail">' +
+      (b.summary ? '<p>' + esc(b.summary) + '</p>' : '') +
+      '<div class="mr-bond-ops-wrap"><span class="mr-bond-ops-label">触发干员</span>' +
+        '<div class="mr-bond-ops">' + (avatars || '<span class="mr-note">当前棋盘没有该羁绊干员</span>') + '</div>' +
+      '</div>' +
+      (effects || '<p class="mr-note">暂无档位数据。</p>') +
+      (b.play ? '<p class="mr-bond-play"><b>本套怎么用</b>' + esc(b.play) + '</p>' : '') +
+    '</div>';
+  }
+
+  function mobilePieceInfoHtml() {
+    if (!editMode || !mobileRange) return '';
+    const o = op(mobileRange.operatorId);
+    if (!o || o.missing) return '';
+    const placement = (state.board?.placements || []).find((p) => p.operatorId === o.id);
+    const dir = normalizeFacing(placement?.facing || 'right');
+    const sk = skillOf(o);
+    const counts = computeBondCounts(state);
+    const bondRows = (o.bonds || []).map((id) => {
+      const b = bond(id);
+      if (!b) return '';
+      const c = counts[id] || { count: 0, tierThreshold: null };
+      const open = mobileBondOpen === id;
+      return '<div class="mr-info-bond-wrap">' +
+        '<button class="mr-info-bond" type="button" data-bond-id="' + attr(id) + '" aria-expanded="' + open + '">' +
+          '<img src="' + bondIcon(id) + '" alt="" />' +
+          '<span>' + esc(b.name) + '</span>' +
+          '<b>' + esc(c.count) + ' / ' + esc(c.tierThreshold ?? '—') + '</b>' +
+          '<i>' + (open ? '▾' : '▸') + '</i>' +
+        '</button>' +
+        (open ? mobileBondDetailHtml(id, b) : '') +
+      '</div>';
+    }).join('');
+    const skills = (o.skills || []).map((s, i) => {
+      const on = i === Number(o.skillIdx || 0);
+      return '<div class="mr-piece-skill' + (on ? ' on' : '') + '">' +
+        '<div class="mr-piece-skill-head"><b>' + skillNumeral(i) + ' · ' + esc(s.name || '') + '</b>' +
+          '<span>SP ' + esc(s.spCost ?? '—') + ' / 初动 ' + esc(s.initSp ?? '—') + (s.duration ? ' / ' + esc(s.duration) + 's' : '') + '</span></div>' +
+        '<p>' + esc(s.desc || '') + '</p>' +
+      '</div>';
+    }).join('');
+    return '<section class="mr-piece-info" id="mrPieceInfo">' +
+      '<div class="mr-piece-head">' +
+        '<img class="mr-piece-avatar" src="' + avatarSrc(o.avatar) + '" alt="" style="border-color:' + rarityColor(o) + '" />' +
+        '<div class="mr-piece-title"><b>' + esc(o.name) + '</b><span>' + esc(o.profession || '') + ' · 朝向' + (FACING_LABEL[dir] || dir) +
+          (sk ? ' · 技能 ' + skillNumeral(o.skillIdx) + ' ' + esc(sk.name) : '') + '</span></div>' +
+        '<button class="mr-piece-close" type="button" data-mr-piece-close>收起</button>' +
+      '</div>' +
+      '<div class="mr-piece-sub">羁绊</div>' +
+      '<div class="mr-piece-bonds">' + (bondRows || '<p class="mr-note">该干员没有羁绊数据。</p>') + '</div>' +
+      '<div class="mr-piece-sub">特性</div>' +
+      '<div class="mr-piece-text">' +
+        (o.trait ? '<p><b>基础</b>' + esc(o.trait) + '</p>' : '') +
+        (o.eliteTrait ? '<p><b>精锐</b>' + esc(o.eliteTrait) + '</p>' : '') +
+        (!o.trait && !o.eliteTrait ? '<p class="mr-note">资料库未收录特性。</p>' : '') +
+      '</div>' +
+      '<div class="mr-piece-sub">技能</div>' +
+      '<div class="mr-piece-skills">' + (skills || '<p class="mr-note">资料库未收录技能。</p>') + '</div>' +
+      '<div class="mr-piece-actions"><button class="mr-action" type="button" data-op-id="' + attr(o.id) + '">完整详情</button></div>' +
+    '</section>';
+  }
+
+  function mobileEquipDetailHtml() {
+    if (!mobileEquipOpen) return '';
+    const key = mobileEquipOpen.key;
+    if (!ITEM_META[key]) return '';
+    const actions = editMode
+      ? '<div class="mr-action-row">' +
+          '<button class="mr-action" type="button" data-mr-equip-change data-op-id="' + attr(mobileEquipOpen.opId) + '" data-slot="' + attr(mobileEquipOpen.slot) + '" data-index="' + attr(mobileEquipOpen.index) + '">更换装备</button>' +
+          '<button class="mr-action danger" type="button" data-mr-equip-remove data-op-id="' + attr(mobileEquipOpen.opId) + '" data-slot="' + attr(mobileEquipOpen.slot) + '" data-index="' + attr(mobileEquipOpen.index) + '">移除</button>' +
+        '</div>'
+      : '';
+    return '<div class="mr-equip-detail" id="mrEquipDetail">' +
+      '<button class="mr-detail-close" type="button" data-mr-equip-close>收起</button>' +
+      equipmentDetailHtml(key) +
+      actions +
+    '</div>';
+  }
+
+  function handleMobileBoardClick(cell) {
+    if (!cell) return;
+    const row = Number(cell.dataset.row);
+    const col = Number(cell.dataset.col);
+    if (!Number.isFinite(row) || !Number.isFinite(col)) return;
+    const placement = (state.board?.placements || []).find((p) => Number(p.row) === row && Number(p.col) === col);
+    if (placement) {
+      const id = placement.operatorId;
+      if (mobileRange && mobileRange.operatorId === id && mobileRangeArmed) {
+        cycleFacing(id);
+        return;
+      }
+      mobileRange = { operatorId: id, row, col };
+      mobileRangeArmed = true;
+      renderPoster();
+      return;
+    }
+    if (selectedRosterId && hasOperator(selectedRosterId)) {
+      const id = selectedRosterId;
+      const existing = (state.board?.placements || []).find((p) => p.operatorId === id);
+      mobileRange = { operatorId: id, row, col };
+      mobileRangeArmed = true;
+      placeRoster(id, row, col, existing ? normalizeFacing(existing.facing) : 'right', '', true);
+      toast('已放置「' + (op(id)?.name || id) + '」；再点棋子换朝向');
+      return;
+    }
+    clearMobileRangeDom();
+  }
+
+  function bindMobileBoardDrag() {
+    const root = $('#mobileRead');
+    if (!root) return;
+    root.addEventListener('pointerdown', (e) => {
+      if (!mobileUI || !editMode || e.button !== 0) return;
+      if (e.target.closest('[data-mr-remove], input, textarea, [contenteditable="true"]')) return;
+      const cell = e.target.closest('.mr-cell.on');
+      if (!cell) return;
+      const id = cell.dataset.opId;
+      if (!id || !hasOperator(id)) return;
+      mobileDrag = { id, cell, startX: e.clientX, startY: e.clientY, pointerId: e.pointerId, moved: false };
+      try { cell.setPointerCapture(e.pointerId); } catch (err) { /* older browsers */ }
+    }, { passive: true });
+    root.addEventListener('pointermove', (e) => {
+      const drag = mobileDrag;
+      if (!drag) return;
+      if (!drag.moved && Math.hypot(e.clientX - drag.startX, e.clientY - drag.startY) < 8) return;
+      if (!drag.moved) {
+        drag.moved = true;
+        document.body.classList.add('mr-dragging');
+        drag.cell.classList.add('mr-drag-source');
+      }
+      const target = document.elementFromPoint(e.clientX, e.clientY)?.closest('.mr-cell');
+      $$('.mr-cell.mr-drop').forEach((el) => { if (el !== target) el.classList.remove('mr-drop'); });
+      if (target && target !== drag.cell) target.classList.add('mr-drop');
+      e.preventDefault();
+    }, { passive: false });
+    root.addEventListener('pointerup', (e) => {
+      const drag = mobileDrag;
+      if (!drag) return;
+      const target = document.elementFromPoint(e.clientX, e.clientY)?.closest('.mr-cell');
+      const moved = drag.moved;
+      const id = drag.id;
+      cancelMobileDrag();
+      if (!moved) return;
+      suppressClickUntil = Date.now() + 450;
+      if (!target) return;
+      const row = Number(target.dataset.row);
+      const col = Number(target.dataset.col);
+      const from = (state.board?.placements || []).find((p) => p.operatorId === id);
+      if (!Number.isFinite(row) || !Number.isFinite(col)) return;
+      if (from && Number(from.row) === row && Number(from.col) === col) return;
+      mobileRange = { operatorId: id, row, col };
+      mobileRangeArmed = true;
+      movePlacement(id, row, col, '', '', true);
+      toast('位置已更新');
+    });
+    root.addEventListener('pointercancel', cancelMobileDrag);
+  }
+
+  function openEquipmentInfo(key) {
+    if (!ITEM_META[key]) return;
+    openModal('<div class="modal-body">' +
+      '<div class="detail-kicker">EQUIP / ' + esc(key) + '</div>' +
+      '<h2 class="detail-name" style="font-size:26px">' + esc(ITEM_META[key]) + '</h2>' +
+      '<div class="equip-detail-modal">' + equipmentDetailHtml(key) + '</div>' +
+      '<div class="form-actions"><button class="btn" type="button" data-close>关闭</button></div>' +
+    '</div>');
+  }
+
+  function mobileEditAttrs(path, max, placeholder) {
+    return editMode
+      ? ' contenteditable="true" spellcheck="false" data-edit="' + attr(path) + '" data-max="' + max + '" data-placeholder="' + attr(placeholder) + '"'
+      : '';
+  }
+
+  renderMobile = function renderMobileView() {
+    const box = $('#mobileRead');
+    if (!box) return;
+    const keepTop = box.scrollTop;
+    const editing = !!editMode;
+    const m = state.meta || {};
+    const b = state.board || { cols: 8, rows: 4, placements: [] };
+    const cols = Math.max(1, Number(b.cols) || 8);
+    const rows = Math.max(1, Number(b.rows) || 4);
+    const byCell = {};
+    for (const p of (b.placements || [])) byCell[p.row + ',' + p.col] = p;
+
+    /* 1. title */
+    const proof = String(m.proof || '').trim();
+    const titleHtml = '<section class="mr-hero">' +
+      '<div class="mr-kicker"><span class="mr-kicker-ru">РЕГЛАМЕНТ</span><span class="mr-kicker-cn">卫戍协议 · 规程</span></div>' +
+      '<h1 class="mr-title"' + mobileEditAttrs('meta.title', 24, '点此写标题') + '>' + esc(m.title || '未命名阵容') + '</h1>' +
+      '<p class="mr-subtitle"' + mobileEditAttrs('meta.subtitle', 16, '点此写副标题') + '>' + esc(m.subtitle || '') + '</p>' +
+      ((proof || editing) ? '<p class="mr-proof"' + mobileEditAttrs('meta.proof', 20, '点此写实测证明') + '>' + esc(proof) + '</p>' : '') +
+    '</section>';
+
+    /* 2. core operators — horizontal scroll */
+    const core = (state.coreOperators || []).map((c) => op(c.operatorId)).filter((o) => o && !o.missing);
+    const coreHtml = core.length ? core.map((o) => {
+      const sk = skillOf(o);
+      const icon = skillIcon(o);
+      return '<button class="mr-core" type="button" data-op-id="' + attr(o.id) + '" style="--rarity:' + rarityColor(o) + ';--role:' + roleColor(o) + '" aria-label="' + attr('查看 ' + o.name + ' 详情') + '">' +
+        '<span class="mr-core-avatar"><img src="' + avatarSrc(o.avatar) + '" alt="' + attr(o.name) + '" draggable="false" /></span>' +
+        '<span class="mr-core-name">' + esc(o.name) + '</span>' +
+        '<span class="mr-core-meta">' +
+          '<span class="mr-skill" title="' + attr(sk ? '技能 ' + skillNumeral(o.skillIdx) + '：' + sk.name : '未配置技能') + '">' +
+            (icon ? '<img src="' + icon + '" alt="" draggable="false" />' : '') +
+            '<b>' + skillNumeral(o.skillIdx) + '</b>' +
+          '</span>' +
+          moduleBadge(o) +
+        '</span>' +
+      '</button>';
+    }).join('') : '<p class="mr-empty">还没有核心干员。可以在海报版编辑后回到这里阅读。</p>';
+
+    /* 3. board */
+    const cells = [];
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const p = byCell[r + ',' + c];
+        const o = p ? op(p.operatorId) : null;
+        if (o) {
+          const dir = normalizeFacing(p.facing);
+          const remove = editing && mobileRange?.operatorId === o.id
+            ? '<button class="mr-cell-remove" type="button" data-mr-remove="' + attr(o.id) + '" aria-label="移出棋盘">×</button>'
+            : '';
+          cells.push('<div class="mr-cell on" role="button" tabindex="0" data-op-id="' + attr(o.id) + '" data-row="' + r + '" data-col="' + c + '" style="--rarity:' + rarityColor(o) + '" aria-label="' + attr(o.name + '，朝向' + FACING_LABEL[dir] + '，技能 ' + skillNumeral(o.skillIdx)) + '">' +
+            '<img src="' + avatarSrc(o.avatar) + '" alt="' + attr(o.name) + '" draggable="false" />' +
+            '<span class="mr-facing" aria-hidden="true">' + facingArrow(dir) + '</span>' +
+            '<span class="mr-cell-skill" aria-hidden="true">' + skillNumeral(o.skillIdx) + '</span>' +
+            remove +
+          '</div>');
+        } else {
+          const placeable = editing && selectedRosterId ? ' mr-placeable' : '';
+          const role = editing
+            ? ' role="button" tabindex="0" aria-label="' + attr(selectedRosterId ? '放置干员' : '空格，点其他位置取消范围') + '"'
+            : ' aria-hidden="true"';
+          cells.push('<div class="mr-cell empty' + placeable + '" data-row="' + r + '" data-col="' + c + '"' + role + '></div>');
+        }
+      }
+    }
+    const boardNote = String(state.meta?.boardNote || '').trim();
+    const boardNoteHtml = (boardNote || editing)
+      ? '<div class="mr-board-note"><span class="mr-board-note-label">缺卡</span><span class="mr-board-note-text"' +
+          (editing ? mobileEditAttrs('meta.boardNote', 46, '点此写：核心 3 人不建议替…') : '') + '>' + esc(boardNote) + '</span></div>'
+      : '';
+    const boardHtml = '<section class="mr-section mr-board-section">' +
+      '<div class="mr-sec-head"><h2 class="mr-sec-title">站位</h2><span class="mr-sec-note">' + cols + ' × ' + rows + ' · 箭头=朝向</span></div>' +
+      '<p class="mr-note">' + (editing ? '点「选人」看详情 → 点「放置到棋盘」→ 点空格；点棋子先看范围/羁绊/特性/技能，再点换朝向（选中后有 × 移除）；拖棋子换位；点虚线文字可改。' : '点棋子看详情；本页只读，点「编辑」可摆站位。敌人从右来。') + '</p>' +
+      '<div class="mr-board-wrap"><div class="mr-board" style="--cols:' + cols + '">' + cells.join('') + '</div></div>' +
+      '<p class="mr-range-note" id="mrRangeNote" hidden></p>' +
+      mobilePieceInfoHtml() +
+      boardNoteHtml +
+    '</section>';
+
+    /* 4. stages */
+    const stages = state.stages || [];
+    const stageHtml = stages.length ? stages.map((s, i) => {
+      const ids = stageIds(s).map((id) => op(id)).filter(Boolean);
+      const note = String(s.note || '').trim();
+      const noteMax = s.id === 'boss' ? 60 : 40;
+      return '<article class="mr-stage">' +
+        '<div class="mr-stage-head"><span class="mr-stage-label">' + esc(s.label || '') + '</span><span class="mr-stage-count">' + ids.length + ' 人</span></div>' +
+        (ids.length
+          ? '<div class="mr-stage-ops">' + ids.map((o) => '<button class="mr-stage-op" type="button" data-op-id="' + attr(o.id) + '" style="--rarity:' + rarityColor(o) + '" aria-label="' + attr('查看 ' + o.name + ' 详情') + '"><img src="' + avatarSrc(o.avatar) + '" alt="' + attr(o.name) + '" draggable="false" /></button>').join('') + '</div>'
+          : '<p class="mr-empty">这一阶段还没有阵容。</p>') +
+        ((note || editing) ? '<p class="mr-stage-note"' + mobileEditAttrs('stages.' + i + '.note', noteMax, s.id === 'boss' ? '点此写 Boss 阶段要点' : '点此写阶段要点') + '>' + esc(note) + '</p>' : '') +
+      '</article>';
+    }).join('') : '<p class="mr-empty">还没有阶段数据。</p>';
+
+    /* 5. bonds */
+    const counts = computeBondCounts(state);
+    const bondList = Object.values(counts).sort((x, y) =>
+      (y.reachedTier - x.reachedTier) || (y.count - x.count) || String(x.id).localeCompare(String(y.id)));
+    const bondHtml = bondList.length ? bondList.map((bd) => {
+      const lib = bond(bd.id) || { name: bd.id, thresholds: [] };
+      const on = bd.reachedTier > 0;
+      const open = mobileBondOpen === bd.id;
+      return '<div class="mr-bond-wrap">' +
+        '<button class="mr-bond' + (on ? ' on' : ' off') + '" type="button" data-bond-id="' + attr(bd.id) + '" aria-expanded="' + open + '" aria-label="' + attr('查看 ' + lib.name + ' 羁绊，当前 ' + bd.count + ' 人') + '">' +
+          '<img src="' + bondIcon(bd.id) + '" alt="" draggable="false" />' +
+          '<span class="mr-bond-name">' + esc(lib.name) + '</span>' +
+          '<span class="mr-bond-count">' + esc(bd.count) + ' / ' + esc(bd.tierThreshold ?? '—') + '</span>' +
+          '<i class="mr-chev" aria-hidden="true">' + (open ? '▾' : '▸') + '</i>' +
+        '</button>' +
+        (open ? mobileBondDetailHtml(bd.id, lib) : '') +
+      '</div>';
+    }).join('') : '<p class="mr-empty">棋盘上还没有干员，羁绊未统计。</p>';
+    const bondOn = bondList.filter((x) => x.reachedTier > 0).length;
+    const bondSection = '<section class="mr-section">' +
+      '<div class="mr-sec-head"><h2 class="mr-sec-title">羁绊</h2><span class="mr-sec-note">' + (bondList.length ? bondOn + ' 已激活 / ' + bondList.length : '暂无') + '</span></div>' +
+      '<div class="mr-bonds">' + bondHtml + '</div>' +
+    '</section>';
+
+    /* 6. equipment */
+    const eqRows = (state.equipment || []).slice(0, 3);
+    const eqHtml = eqRows.length ? eqRows.map((row) => {
+      const o = op(row.operatorId);
+      if (!o) return '';
+      const colsHtml = ['must', 'big', 'optional'].map((slot) => {
+        const keys = row[slot] || [];
+        const icons = keys.map((key, i) =>
+          '<button class="mr-equip-icon" type="button" data-mr-equip="' + attr(key) + '" data-op-id="' + attr(o.id) + '" data-slot="' + slot + '" data-index="' + i + '" title="' + attr(item(key)) + '" aria-label="' + attr(item(key) + '，查看装备效果') + '"><img src="' + itemSrc(key) + '" alt="" draggable="false" /></button>').join('');
+        const add = editing && keys.length < 3
+          ? '<button class="mr-equip-icon mr-equip-add" type="button" data-mr-equip-add data-op-id="' + attr(o.id) + '" data-slot="' + slot + '" aria-label="添加装备">+</button>'
+          : '';
+        return '<div class="mr-equip-col"><span class="mr-equip-label">' + ({ must: '必做', big: '大提升', optional: '可选' }[slot]) + '</span>' +
+          '<div class="mr-equip-icons">' + (icons + add || '<span class="mr-equip-none">—</span>') + '</div></div>';
+      }).join('');
+      return '<div class="mr-equip-row">' +
+        '<button class="mr-equip-op" type="button" data-op-id="' + attr(o.id) + '" style="--rarity:' + rarityColor(o) + '" aria-label="' + attr('查看 ' + o.name + ' 详情') + '">' +
+          '<img src="' + avatarSrc(o.avatar) + '" alt="' + attr(o.name) + '" draggable="false" />' +
+          '<span>' + esc(o.name) + '</span>' +
+        '</button>' + colsHtml +
+      '</div>';
+    }).join('') : '<p class="mr-empty">还没有装备位。</p>';
+    const eqSection = '<section class="mr-section">' +
+      '<div class="mr-sec-head"><h2 class="mr-sec-title">装备</h2><span class="mr-sec-note">必做 / 大提升 / 可选</span></div>' +
+      '<div class="mr-equips">' + eqHtml + '</div>' +
+      mobileEquipDetailHtml() +
+    '</section>';
+
+    /* 7. covenant strategy — full effect text, never trimmed */
+    const st = state.strategy || { main: '', alternatives: [], reason: '' };
+    const main = strategyById(st.main);
+    const alts = (st.alternatives || []).map((id) => strategyById(id)).filter(Boolean).slice(0, 2);
+    const strategyCard = (s, label) => '<article class="mr-strategy">' +
+      '<div class="mr-strategy-label">' + esc(label) + '</div>' +
+      '<button class="mr-strategy-head" type="button" data-strategy-open="' + attr(s.id) + '" aria-label="' + attr('查看 ' + s.name + ' 完整效果') + '">' +
+        '<img src="' + strategyIcon(s) + '" alt="" draggable="false" />' +
+        '<span class="mr-strategy-name">' + esc(s.name) + '</span>' +
+        '<span class="mr-kind ' + attr(s.kind || '') + '">' + strategyKind(s) + '</span>' +
+        '<span class="mr-hp">HP ' + esc(s.initialHp ?? '—') + '</span>' +
+      '</button>' +
+      '<p class="mr-effect">' + esc(s.effect || '') + '</p>' +
+      (editing ? '<div class="mr-strategy-actions">' +
+        (label === '主盟约'
+          ? '<button class="mr-action" type="button" data-strategy-edit>更换主盟约</button>'
+          : '<button class="mr-action" type="button" data-strategy-alt-add>调整次选</button>') +
+        '<button class="mr-action danger" type="button" data-strategy-remove="' + attr(s.id) + '">移除</button>' +
+      '</div>' : '') +
+    '</article>';
+    const mainHtml = main
+      ? strategyCard(main, '主盟约')
+      : '<p class="mr-empty">还没有选择盟约策略。' +
+          (editing ? ' <button class="mr-action" type="button" data-strategy-edit>选择主盟约</button>' : '点「海报」进入编辑后可以选择。') +
+        '</p>';
+    const altHtml = alts.map((s) => strategyCard(s, '次选')).join('');
+    const addAlt = editing && main && alts.length < 2
+      ? '<button class="mr-action mr-strategy-add" type="button" data-strategy-alt-add>+ 次选</button>'
+      : '';
+    const reason = String(st.reason || '').trim();
+    const strategyHtml = '<section class="mr-section">' +
+      '<div class="mr-sec-head"><h2 class="mr-sec-title">盟约策略</h2><span class="mr-sec-note">' + (main ? '主盟约' + (alts.length ? ' + ' + alts.length + ' 次选' : '') : '未选择') + '</span></div>' +
+      '<div class="mr-strategies">' + mainHtml + altHtml + addAlt + '</div>' +
+      ((reason || editing) ? '<div class="mr-reason"><b>为什么选它</b><p' + mobileEditAttrs('strategy.reason', 40, '点此写为什么选它') + '>' + esc(reason) + '</p></div>' : '') +
+    '</section>';
+
+    /* 8. footer */
+    const credit = String(m.credit || '').trim();
+    const footerMeta = editing
+      ? '<span' + mobileEditAttrs('meta.author', 12, '作者') + '>' + esc(m.author || '') + '</span> · ' +
+        '<span' + mobileEditAttrs('meta.version', 8, '版本') + '>' + esc(m.version || '') + '</span> · ' +
+        '<span' + mobileEditAttrs('meta.date', 10, '日期') + '>' + esc(m.date || '') + '</span>'
+      : esc(m.author || '') + ' · ' + esc(m.version || '') + ' · ' + esc(m.date || '');
+    const footerHtml = '<footer class="mr-footer">' +
+      '<p><b>非官方 · 非盈利 · 素材版权归鹰角网络所有</b> · 数据：PRTS · 可露希尔Wiki' + (credit ? ' · ' + esc(credit) : '') + '</p>' +
+      '<p class="mr-meta">' + footerMeta + '</p>' +
+    '</footer>';
+
+    /* 10. sticky mode bar + fixed action dock + roster sheet */
+    const topHtml = '<header class="mr-top">' +
+      '<span class="mr-top-title"><b>卫戍协议 · 规程</b><span>' + (editing ? '编辑中 / EDIT' : '阅读版 / READ') + '</span></span>' +
+      '<div class="mr-switch" role="group" aria-label="显示模式">' +
+        '<button class="mr-switch-btn on" type="button" data-view-mode="read" aria-pressed="true">阅读版</button>' +
+        '<button class="mr-switch-btn" type="button" data-view-mode="poster" aria-pressed="false">海报</button>' +
+      '</div>' +
+    '</header>';
+    const editHint = editing
+      ? '<div class="mr-edit-hint"><b>手机编辑</b><span>点「选人」看详情 → 点「放置到棋盘」→ 点空格；点棋子先看范围/羁绊/特性/技能，再点换朝向（选中后有 × 移除）；拖棋子换位；点虚线文字可改。</span></div>'
+      : '';
+    const dockHtml = editing
+      ? '<nav class="mr-dock" aria-label="手机编辑操作">' +
+          '<button class="mr-dock-btn" type="button" data-mr-roster>选人</button>' +
+          '<button class="mr-dock-btn primary" type="button" data-mr-edit>完成</button>' +
+          '<button class="mr-dock-btn" type="button" data-view-share>分享</button>' +
+          '<button class="mr-dock-btn" type="button" data-view-export>导出</button>' +
+        '</nav>'
+      : '<nav class="mr-dock" aria-label="阅读版操作">' +
+          '<button class="mr-dock-btn" type="button" data-mr-edit>编辑</button>' +
+          '<button class="mr-dock-btn" type="button" data-view-share>分享</button>' +
+          '<button class="mr-dock-btn primary" type="button" data-view-export>导出</button>' +
+          '<button class="mr-dock-btn" type="button" data-view-mode="poster">海报</button>' +
+        '</nav>';
+    const sheetHtml = editing && mobileRosterOpen ? mobileRosterSheetHtml() : '';
+
+    box.innerHTML = topHtml +
+      '<div class="mr-wrap">' + editHint + titleHtml +
+        '<section class="mr-section"><div class="mr-sec-head"><h2 class="mr-sec-title">核心干员</h2><span class="mr-sec-note">' + core.length + ' 人 · 可横滑</span></div><div class="mr-core-row">' + coreHtml + '</div></section>' +
+        boardHtml +
+        bondSection +
+        '<section class="mr-section"><div class="mr-sec-head"><h2 class="mr-sec-title">成型节奏</h2><span class="mr-sec-note">' + stages.length + ' 阶段</span></div><div class="mr-stages">' + stageHtml + '</div></section>' +
+        eqSection + strategyHtml + footerHtml +
+      '</div>' + sheetHtml + dockHtml;
+    applyMobileRange();
+    filterMobileRoster();
+    box.scrollTop = keepTop;
+  };
+
+  /* ------------------------------------------------------------
      Events
      ------------------------------------------------------------ */
   function onClick(e) {
     if (Date.now() < suppressClickUntil) return;
+    if (mobileUI && editMode && mobileRange && !e.target.closest('.mr-cell') && !e.target.closest('.mr-piece-info')) clearMobileRangeDom();
+    const mrRemove = e.target.closest('[data-mr-remove]');
+    if (mrRemove) {
+      const id = mrRemove.dataset.mrRemove;
+      if (mobileRange?.operatorId === id) { mobileRange = null; mobileRangeArmed = false; }
+      removePlacement(id);
+      clearRosterSelection();
+      return;
+    }
+    if (e.target.closest('[data-mr-edit]')) { setMobileEdit(!editMode); return; }
+    if (e.target.closest('[data-mr-roster]')) {
+      if (!editMode) return;
+      mobileRosterOpen = !mobileRosterOpen;
+      if (!mobileRosterOpen) mobileRosterQuery = '';
+      renderPoster();
+      return;
+    }
+    if (e.target.closest('[data-mr-filter-toggle]')) {
+      mobileFilterOpen = !mobileFilterOpen;
+      renderPoster();
+      return;
+    }
+    const mrfChip = e.target.closest('[data-mrf-group]');
+    if (mrfChip) {
+      const group = mrfChip.dataset.mrfGroup;
+      const value = mrfChip.dataset.mrfValue;
+      const set = mobileFilter[group];
+      if (set) {
+        if (value === 'all') set.clear();
+        else if (set.has(value)) set.delete(value);
+        else set.add(value);
+      }
+      renderPoster();
+      return;
+    }
+    if (e.target.closest('[data-mrf-reset]')) {
+      resetMobileFilter();
+      renderPoster();
+      return;
+    }
+    if (e.target.closest('[data-mr-sheet-close]')) {
+      mobileRosterOpen = false;
+      mobileRosterQuery = '';
+      renderPoster();
+      return;
+    }
+    const mrOp = e.target.closest('[data-mr-op-id]');
+    if (mrOp) { openDetail(mrOp.dataset.mrOpId); return; }
+    const mrPlace = e.target.closest('[data-mr-place-op]');
+    if (mrPlace) { closeModal(); selectMobileRoster(mrPlace.dataset.mrPlaceOp, true); return; }
+    if (e.target.closest('[data-mr-piece-close]')) { clearMobileRangeDom(); return; }
+    const mrOpEdit = e.target.closest('[data-mr-op-edit]');
+    if (mrOpEdit) { openOperatorEditor(mrOpEdit.dataset.mrOpEdit); return; }
+    if (mobileUI && editMode) {
+      const mrCell = e.target.closest('.mr-cell');
+      if (mrCell) { handleMobileBoardClick(mrCell); return; }
+    }
+    if (e.target.closest('[data-view-mode]')) { setViewMode(e.target.closest('[data-view-mode]').dataset.viewMode); return; }
+    if (e.target.closest('[data-view-share]')) { openShare(); return; }
+    if (e.target.closest('[data-view-export]')) { exportPoster(); return; }
+    if (e.target.closest('#readBtn')) { setViewMode('read'); return; }
+    const mrEquip = e.target.closest('[data-mr-equip]');
+    if (mrEquip) {
+      if (mobileUI) {
+        mobileEquipOpen = {
+          key: mrEquip.dataset.mrEquip,
+          opId: mrEquip.dataset.opId,
+          slot: mrEquip.dataset.slot,
+          index: Number(mrEquip.dataset.index)
+        };
+        renderPoster();
+        requestAnimationFrame(() => $('#mrEquipDetail')?.scrollIntoView({ block: 'nearest' }));
+      } else {
+        openEquipmentInfo(mrEquip.dataset.mrEquip);
+      }
+      return;
+    }
+    const mrEquipChange = e.target.closest('[data-mr-equip-change]');
+    if (mrEquipChange) {
+      mobileEquipOpen = null;
+      renderPoster();
+      openItemPicker(mrEquipChange.dataset.opId, mrEquipChange.dataset.slot, Number(mrEquipChange.dataset.index));
+      return;
+    }
+    const mrEquipRemove = e.target.closest('[data-mr-equip-remove]');
+    if (mrEquipRemove) {
+      const opId = mrEquipRemove.dataset.opId;
+      const slot = mrEquipRemove.dataset.slot;
+      const index = Number(mrEquipRemove.dataset.index);
+      const row = (state.equipment || []).find((r) => r.operatorId === opId);
+      if (row && Array.isArray(row[slot]) && Number.isInteger(index)) {
+        row[slot].splice(index, 1);
+        saveNow();
+        mobileEquipOpen = null;
+        renderPoster();
+        toast('已移除装备');
+      }
+      return;
+    }
+    if (e.target.closest('[data-mr-equip-add]')) {
+      const add = e.target.closest('[data-mr-equip-add]');
+      mobileEquipOpen = null;
+      renderPoster();
+      openItemPicker(add.dataset.opId, add.dataset.slot, null);
+      return;
+    }
+    if (e.target.closest('[data-mr-equip-close]')) {
+      mobileEquipOpen = null;
+      renderPoster();
+      return;
+    }
     if (e.target.closest('#shareBtn') || e.target.closest('[data-open-share]')) { openShare(); return; }
     if (e.target.closest('#helpBtn')) { openHelp(); return; }
     if (e.target.closest('#zoomBtn')) { setZoomMode(!zoomMode); return; }
@@ -3005,7 +3942,6 @@
       const group = rfRemove.dataset.rfRemove;
       const value = rfRemove.dataset.rfValue;
       if (group === 'bond') rosterFilter.bond = 'all';
-      else if (group === 'cost') rosterFilter.cost = 'all';
       else rosterFilter[group]?.delete(value);
       renderRosterFilters();
       filterRoster();
@@ -3016,7 +3952,6 @@
       rosterFilter.rarity.clear();
       rosterFilter.trigger.clear();
       rosterFilter.bond = 'all';
-      rosterFilter.cost = 'all';
       renderRosterFilters();
       filterRoster();
       return;
@@ -3101,7 +4036,16 @@
     if (equipmentCard) { selectEquipmentDetail(equipmentCard.dataset.itemKey); return; }
 
     const bondEl = e.target.closest('[data-bond-id]');
-    if (bondEl) { e.preventDefault(); openBond(bondEl.dataset.bondId); return; }
+    if (bondEl) {
+      e.preventDefault();
+      if (mobileUI) {
+        mobileBondOpen = mobileBondOpen === bondEl.dataset.bondId ? '' : bondEl.dataset.bondId;
+        renderPoster();
+        return;
+      }
+      openBond(bondEl.dataset.bondId);
+      return;
+    }
 
     const strategyRemove = e.target.closest('[data-strategy-remove]');
     if (strategyRemove) { e.preventDefault(); removeStrategy(strategyRemove.dataset.strategyRemove); return; }
@@ -3218,12 +4162,12 @@
       toast(state.meta.showQr ? '已开启：海报表头会印二维码' : '已关闭：海报不印二维码');
       return;
     }
-    if (e.target.id === 'rosterCost') { rosterFilter.cost = e.target.value; renderRosterFilters(); filterRoster(); }
     if (e.target.id === 'rosterBond') { rosterFilter.bond = e.target.value; renderRosterFilters(); filterRoster(); }
   });
 
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
+      if (mobileUI && mobileRosterOpen) { mobileRosterOpen = false; mobileRosterQuery = ''; renderPoster(); return; }
       if (pendingPlacement) cancelPendingPlacement();
       else if ($('.modal')) closeModal();
       else if (zoomMode) setZoomMode(false);
@@ -3240,6 +4184,7 @@
 
   document.addEventListener('input', (e) => {
     if (!editMode) return;
+    if (e.target.id === 'mrRosterSearch') { mobileRosterQuery = e.target.value; filterMobileRoster(); return; }
     if (e.target.id === 'rosterSearch') { rosterFilter.q = e.target.value; filterRoster(); return; }
     if (e.target.id === 'equipmentSearch') { equipmentQuery = e.target.value; renderEquipmentLibrary(); return; }
     if (e.target.id === 'strategySearch') { strategyPickerQuery = e.target.value; refreshStrategyPicker(); return; }
@@ -3282,21 +4227,45 @@
     importFile.value = '';
   });
 
-  window.addEventListener('resize', () => { fitPoster(); layoutBoard(); });
+  window.addEventListener('resize', () => {
+    if (!isNarrowView()) {
+      if (mobileUI) exitMobileUI();
+    } else if (!mobileUI && !editMode && storedViewMode() !== 'poster') {
+      enterMobileUI();
+    }
+    fitPoster();
+    layoutBoard();
+  });
   window.addEventListener('beforeunload', saveNow);
 
   /* ------------------------------------------------------------
      Boot
      ------------------------------------------------------------ */
+  // Share links must be applied before the first view decision, so a #s= link
+  // opened on a narrow screen renders the shared lineup straight into 阅读版.
+  const sharedLoaded = applyShareHash();
+  initViewMode(sharedLoaded);
   renderPoster();
   fitPoster();
   bindBoardDnD();
+  bindMobileBoardDrag();
   updateSaveState();
-  applyShareHash();
   setTimeout(maybeShowZoomHint, 900);
   window.__posterDebug = {
     get state() { return state; },
     get zoomed() { return zoomMode; },
+    get mobileUI() { return mobileUI; },
+    get viewMode() { return mobileUI ? 'read' : 'poster'; },
+    get editMode() { return editMode; },
+    get mobileRange() { return mobileRange; },
+    get mobileRosterOpen() { return mobileRosterOpen; },
+    enterMobileUI,
+    exitMobileUI,
+    renderMobile,
+    setViewMode,
+    setMobileEdit,
+    selectMobileRoster,
+    openEquipmentInfo,
     renderPoster,
     exportPoster,
     posterCheck,
