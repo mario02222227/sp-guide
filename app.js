@@ -907,8 +907,12 @@
         const add = editMode && (row[slot] || []).length < 3 ? '<button class="equip-add edit-only" type="button" data-equip-add data-equip-drop="1" data-op-id="' + attr(o.id) + '" data-slot="' + slot + '" title="添加装备（也可从装备库拖入）">+</button>' : '';
         return '<div class="equip-col">' + icons + add + '</div>';
       }).join('');
+      // 装备区也要能改这颗棋子：编辑态给头像角上加一个铅笔按钮
+      const editBadge = editMode
+        ? '<button class="equip-edit edit-only" type="button" data-edit-op="' + attr(o.id) + '" title="编辑干员" aria-label="' + attr('编辑 ' + o.name) + '">✎</button>'
+        : '';
       return '<div class="equip-row">' +
-        '<div class="equip-avatar" data-op-id="' + attr(o.id) + '" role="button" tabindex="0" aria-label="查看' + attr(o.name) + '" style="--rarity:' + rarityColor(o) + '"><img src="' + avatarSrc(o.avatar) + '" alt="' + attr(o.name) + '" draggable="false" /></div>' +
+        '<div class="equip-avatar" data-op-id="' + attr(o.id) + '" role="button" tabindex="0" aria-label="查看' + attr(o.name) + '" style="--rarity:' + rarityColor(o) + '"><img src="' + avatarSrc(o.avatar) + '" alt="' + attr(o.name) + '" draggable="false" />' + editBadge + '</div>' +
         cols +
       '</div>';
     }).join('');
@@ -2581,6 +2585,19 @@
   function rosterFilterGroup(label, chips) {
     return '<div class="rf-group"><span class="rf-label">' + label + '</span><div class="rf-chips">' + chips + '</div></div>';
   }
+  // PC 端筛选区四组 chip 会占掉 400px，允许收起；偏好记在本机。
+  const FILTERS_OPEN_KEY = 'sp-guide-filters-open-v1';
+  let rosterFiltersCollapsed = null;
+  function filtersCollapsed() {
+    if (rosterFiltersCollapsed === null) {
+      try { rosterFiltersCollapsed = localStorage.getItem(FILTERS_OPEN_KEY) === '0'; } catch (e) { rosterFiltersCollapsed = false; }
+    }
+    return rosterFiltersCollapsed;
+  }
+  function setFiltersCollapsed(value) {
+    rosterFiltersCollapsed = !!value;
+    try { localStorage.setItem(FILTERS_OPEN_KEY, value ? '0' : '1'); } catch (e) { /* private mode */ }
+  }
   function renderRosterFilters() {
     const box = $('#rosterFilters');
     if (!box) return;
@@ -2595,7 +2612,11 @@
     for (const k of rosterFilter.kind) active.push({ group: 'kind', value: k, label: k });
     for (const id of rosterFilter.bond) active.push({ group: 'bond', value: id, label: state.bondLibrary?.[id]?.name || id });
     box.innerHTML =
-      '<input class="roster-search" id="rosterSearch" placeholder="搜索干员 / 拼音" value="' + attr(rosterFilter.q) + '" />' +
+      '<div class="rf-head">' +
+        '<input class="roster-search" id="rosterSearch" placeholder="搜索干员 / 拼音" value="' + attr(rosterFilter.q) + '" />' +
+        '<button class="rf-toggle" type="button" data-rf-toggle aria-expanded="' + (filtersCollapsed() ? 'false' : 'true') + '">' + (filtersCollapsed() ? '展开筛选' : '收起筛选') + '</button>' +
+      '</div>' +
+      '<div class="rf-body"' + (filtersCollapsed() ? ' hidden' : '') + '>' +
       rosterFilterGroup('特质', rosterFilterChip('kind', 'all', '全部', rosterFilter.kind.size === 0) + kinds.map((k) => rosterFilterChip('kind', k, k, rosterFilter.kind.has(k))).join('')) +
       rosterFilterGroup('触发', rosterFilterChip('trigger', 'all', '全部', rosterFilter.trigger.size === 0) + triggerCounts.map((t) => rosterFilterChip('trigger', t.id, t.label, rosterFilter.trigger.has(t.id))).join('')) +
       rosterFilterGroup('核心盟约', coreBonds.map(([id, b]) => rosterFilterChip('bond', id, b.name, rosterFilter.bond.has(id))).join('')) +
@@ -2603,6 +2624,7 @@
       '<div class="rf-active"><div class="rf-active-chips">' +
         (active.length ? active.map((a) => '<button class="rf-active-chip" type="button" data-rf-remove="' + a.group + '" data-rf-value="' + attr(a.value) + '">' + esc(a.label) + ' <b>×</b></button>').join('') : '<span class="rf-active-empty">未筛选</span>') +
       '</div><button class="rf-clear" type="button" data-rf-clear>清除全部</button></div>' +
+      '</div>' +
       '<div class="rf-count" id="rosterCount"></div>';
   }
   function desktopFilterChoices() {
@@ -3201,10 +3223,12 @@
     const from = list.find((p) => p.operatorId === id);
     const to = list.find((p) => Number(p.row) === row && Number(p.col) === col);
     const dir = facing ? normalizeFacing(facing) : (from ? normalizeFacing(from.facing) : '');
-    if (from && to && from !== to) {
-      const fr = from.row, fc = from.col, ff = from.facing;
-      from.row = to.row; from.col = to.col; from.facing = dir;
-      to.row = fr; to.col = fc; to.facing = ff;
+    // 交换两个已有棋子：各自保留朝向，也不再进入「选朝向」流程。
+    const isSwap = !!(from && to && from !== to);
+    if (isSwap) {
+      const fr = from.row, fc = from.col;
+      from.row = to.row; from.col = to.col;
+      to.row = fr; to.col = fc;
     } else if (from) {
       from.row = row; from.col = col; from.facing = dir;
     } else {
@@ -3212,13 +3236,14 @@
     }
     state.board.placements = list;
     syncLineup();
-    if (editMode && !noPending) beginPendingPlacement(id, before, dir || previewDir, from ? '移动' : '放入');
+    if (editMode && !noPending && !isSwap) beginPendingPlacement(id, before, dir || previewDir, from ? '移动' : '放入');
     saveNow();
     renderPoster();
     renderRoster();
     renderVariants();
     clearRosterSelection();
-    if (!editMode) toast('站位已更新');
+    if (isSwap) toast('已交换位置，朝向各自保留');
+    else if (!editMode) toast('站位已更新');
   }
 
 
@@ -4726,6 +4751,12 @@
       rosterFilter.trigger.clear();
       rosterFilter.kind.clear();
       rosterFilter.bond.clear();
+      renderRosterFilters();
+      filterRoster();
+      return;
+    }
+    if (e.target.closest('[data-rf-toggle]')) {
+      setFiltersCollapsed(!filtersCollapsed());
       renderRosterFilters();
       filterRoster();
       return;

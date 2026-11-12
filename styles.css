@@ -340,10 +340,18 @@ body.editing .board-unit .drag-handle {
 .equip-header span:nth-child(3) { color: var(--cream); }
 .equip-row { min-height: 0; border-top: 1px solid rgba(74,43,36,.85); }
 .equip-avatar {
+  position: relative;
   width: 54px; height: 54px; border: 3px solid var(--rarity, var(--accent));
   background: #0a0605; overflow: hidden; cursor: pointer;
 }
 .equip-avatar img { width: 100%; height: 100%; object-fit: cover; object-position: top center; }
+.equip-edit {
+  position: absolute; top: 0; right: 0; z-index: 3;
+  width: 20px; height: 20px; padding: 0; place-items: center;
+  border: 1px solid rgba(var(--accent-rgb),.6); background: rgba(10,6,5,.92);
+  color: var(--accent); font: 12px/1 var(--font-sans); cursor: pointer;
+}
+.equip-edit:hover, .equip-edit:focus-visible { border-color: var(--accent); background: rgba(var(--accent-rgb),.18); outline: 0; }
 .equip-col { min-width: 0; min-height: 0; display: flex; flex-wrap: wrap; align-content: center; justify-content: center; gap: 3px; }
 .equip-icon {
   width: 44px; height: 44px; padding: 1px; border: 1px solid transparent;
@@ -651,6 +659,16 @@ body.detail-open .stage { padding-right: calc(var(--detail-w) + 16px); }
 .drawer-filters { flex: 0 0 auto; padding: 8px 10px; border-bottom: 1px solid var(--line); background: #110806; max-height: 46vh; overflow: auto; }
 .roster-search { width: 100%; border: 1px solid var(--line); background: #0a0605; color: var(--ink); padding: 7px 8px; font-size: 12px; outline: 0; }
 .roster-search:focus { border-color: var(--focus); }
+/* PC 端筛选区可整体收起：标题行保留搜索框和开合按钮 */
+.rf-head { display: flex; align-items: center; gap: 8px; }
+.rf-head .roster-search { flex: 1 1 auto; min-width: 0; width: auto; }
+.rf-toggle {
+  flex: 0 0 auto; height: 30px; padding: 0 10px;
+  border: 1px solid rgba(var(--accent-rgb),.45); background: transparent;
+  color: var(--accent-2); font: 700 12px/1 var(--font-sans); cursor: pointer;
+}
+.rf-toggle:hover, .rf-toggle:focus-visible { border-color: var(--accent); color: var(--accent); outline: 0; }
+.rf-body[hidden] { display: none; }
 .roster-filter-row { display: grid; grid-template-columns: minmax(0,1fr); gap: 5px; margin-top: 6px; }
 .rf-group { display: grid; grid-template-columns: 58px minmax(0,1fr); gap: 8px; align-items: start; margin-top: 6px; }
 .rf-label { color: var(--steel); font: 11px/20px var(--font-mono); letter-spacing: .06em; white-space: nowrap; }
