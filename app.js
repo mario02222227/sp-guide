@@ -4109,6 +4109,11 @@
           (sk ? ' · 技能 ' + skillNumeral(o.skillIdx) + ' ' + esc(sk.name) : '') + '</span></div>' +
         '<button class="mr-piece-close" type="button" data-mr-piece-close>收起</button>' +
       '</div>' +
+      // 动作条放头部下方：面板很长，放底部要滚过羁绊/特性/技能才够得着
+      '<div class="mr-piece-actions">' +
+        '<button class="mr-action" type="button" data-op-id="' + attr(o.id) + '">完整详情</button>' +
+        '<button class="mr-action danger" type="button" data-mr-remove="' + attr(o.id) + '">移出棋盘</button>' +
+      '</div>' +
       '<div class="mr-piece-sub">羁绊</div>' +
       '<div class="mr-piece-bonds">' + (bondRows || '<p class="mr-note">该干员没有羁绊数据。</p>') + '</div>' +
       '<div class="mr-piece-sub">特性</div>' +
@@ -4119,10 +4124,6 @@
       '</div>' +
       '<div class="mr-piece-sub">技能</div>' +
       '<div class="mr-piece-skills">' + (skills || '<p class="mr-note">资料库未收录技能。</p>') + '</div>' +
-      '<div class="mr-piece-actions">' +
-        '<button class="mr-action" type="button" data-op-id="' + attr(o.id) + '">完整详情</button>' +
-        '<button class="mr-action danger" type="button" data-mr-remove="' + attr(o.id) + '">移出棋盘</button>' +
-      '</div>' +
     '</section>';
   }
 
