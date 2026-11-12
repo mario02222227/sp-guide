@@ -7,7 +7,8 @@
 | index.html, app.js, styles.css, regulation-theme.css, tools/, tests/, data.js 的布局与默认内容 | 本项目原创 | MIT（见 LICENSE） | 页面、交互、样式、脚本、默认布局 | 原创 |
 | data/stronghold.js | https://github.com/Misyra/Stronghold-Protocol | GPL-3.0（见 LICENSES/GPL-3.0.txt） | 干员数值、技能文本、模组名、攻击范围 | 是；已裁剪/规范化，未复制仓库程序 |
 | data/closure.js | https://closure.wiki/zh-cn/stronghold-protocol/3 | 未找到明确再使用许可；仅署名引用 | 干员特质、精锐特质、羁绊、策略、装备基础/进阶效果 | 是；按海报需要摘录整理 |
-| data/prts.js | https://prts.wiki/ | CC BY-NC-SA 4.0 | 基础游戏模组效果文本（T2 插件） | 是；摘录整理，详见文件头 |
+| data/modules.js | https://closure.wiki/zh-cn/modules | 未找到明确再使用许可；仅署名引用 | 模组名称、类型、L1–L3 属性加成与效果 | 是；tools/fetch-modules.mjs 抓取整理 |
+| data/prts.js | https://prts.wiki/ | CC BY-NC-SA 4.0 | 模组效果摘录（可选交叉核对） | 是；摘录整理，详见文件头 |
 | data/maps.js | https://prts.wiki/w/卫戍协议·规程/战场一览 | CC BY-NC-SA 4.0（站点页脚）；地图画面版权归鹰角 / Yostar | 地图编号、场地、地图装置与特殊地形说明 | 是；按图鉴需要摘录整理 |
 | data/roster-prts.js | https://prts.wiki/ | CC BY-NC-SA 4.0 | 75 名补录干员数值、技能、职业分支、模组名 | 是；摘录整理，详见文件头 |
 | data/pinyin.js | pypinyin | MIT | 141 名干员拼音检索 | 生成 |

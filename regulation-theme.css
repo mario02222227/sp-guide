@@ -16,10 +16,11 @@
   --cream: #f1e6d0;
   --hex: polygon(50% 0, 100% 25%, 100% 75%, 50% 100%, 0 75%, 0 25%);
 
-  /* 覆盖原来偏棕的变量 */
+  /* 覆盖原来偏棕的变量；强调色只改 RGB 三元组，实色与半透明色一起跟着变 */
   --line: #a3342a;
-  --lime: #f6b61e;
-  --cyan: #ff7a2f;
+  --accent-rgb: 246,182,30;
+  --accent-2-rgb: 255,122,47;
+  --accent-hi: #ffd257;
   --faint: #d9b9a6;
   --muted: #e8cdb8;
 }

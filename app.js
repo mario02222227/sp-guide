@@ -1,6 +1,35 @@
 /* ============================================================
    Stronghold Protocol / SP-03 — fixed poster renderer
-   PosterData schemaVersion = 2
+   PosterData schemaVersion = 3
+
+   这个文件是一个 IIFE（要保证 file:// 双击能开，所以不用 ES module / 构建）。
+   找代码时搜下面的分节标题，文件里每一节都有同名的横线注释：
+
+     Share / QR helpers                 头像 / 二维码 / 朝向 / deepMerge 等小工具
+     Migration                          v1 → v2 → v3 迁移；hydrateState / toStorageState
+     Render helpers                     海报各面板的 HTML（renderPoster 汇总）
+     Layout / scale / checks            fitPoster、posterCheck（导出前自检）
+     Editable text / counters           可编辑文字的字数计数
+     Persistence / edit toggle          saveNow / saveSoon、保存状态
+     撤销 / 重做                         挂在 saveNow 上的历史栈
+     Modal                              弹窗、焦点循环与归还
+     干员详情抽屉 / 轻量信息浮层 / 词条关联
+     Operator editor                    干员字段编辑器
+     Saved lineups / drafts             命名存档与自动备份槽
+     New lineup / Board size / Lineup sync
+     Left roster drawer / Right variants drawer / Right equipment library drawer
+     Data import / export
+     Board drag & drop                  拖放、两步选向、范围预览
+     Export 3200 × 2400
+     Share                              分享码、二维码、竖版长图
+     Mobile reading view                手机阅读 / 编辑版（renderMobile）
+     Events                             全局委托：click / keydown / input …
+     Boot
+
+   数据流只有一条，新增功能照着走就行：
+     改 state → saveNow()（落盘 + 记一步撤销）→ renderPoster()（必要时再 renderRoster / renderVariants）
+   持久化的是 toStorageState(state) 这份精简形态（只存用户改过的东西，约 4KB）；
+   完整的 state = 默认资料库 + 精简形态，由 hydrateState() 现场合成，不要把完整 state 写进 localStorage。
    ============================================================ */
 (() => {
   'use strict';
@@ -16,6 +45,27 @@
   const $ = (s, r = document) => r.querySelector(s);
   const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
   const esc = (v) => String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  /* 描述文本关键词高亮：持续叠加 / 单次叠加 / <战斗中> / 已激活的 / 【萨尔贡】
+     先匹配、再分段转义，避免把用户文本当 HTML 执行（返回值可直接插进 innerHTML）。 */
+  const PHASE_TAGS = ['战斗中', '战斗开始时', '战斗结束时', '休整期结束时', '进入休整期时', '开启技能时', '刷新时', '获得时', '售出时'];
+  const RICH_RE = new RegExp('【[^【】\\r\\n]{1,12}】|<(?:' + PHASE_TAGS.join('|') + ')>|持续叠加|单次叠加|已激活的', 'g');
+  function richToken(tok) {
+    if (tok.charAt(0) === '【') return '<span class="kw-name"><i>【</i>' + esc(tok.slice(1, -1)) + '<i>】</i></span>';
+    if (tok.charAt(0) === '<') return '<span class="tag-phase">' + esc(tok.slice(1, -1)) + '</span>';
+    if (tok === '持续叠加') return '<span class="kw-stack">' + esc(tok) + '</span>';
+    if (tok === '单次叠加') return '<span class="kw-stack once">' + esc(tok) + '</span>';
+    return '<span class="kw-state">' + esc(tok) + '</span>';
+  }
+  const rich = (v) => {
+    const text = String(v ?? '');
+    let out = '', last = 0, m;
+    RICH_RE.lastIndex = 0;
+    while ((m = RICH_RE.exec(text))) {
+      out += esc(text.slice(last, m.index)) + richToken(m[0]);
+      last = m.index + m[0].length;
+    }
+    return out + esc(text.slice(last));
+  };
   const attr = (v) => String(v ?? '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
   const clone = (v) => structuredClone(v);
   const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
@@ -59,9 +109,10 @@
   let mobileBondOpen = '';
   let mobileEquipOpen = null;
   let mobileFilterOpen = true;
-  let mobileFilter = { prof: new Set(), rarity: new Set(), trigger: new Set(), bond: new Set() };
+  let mobileFilter = { trigger: new Set(), kind: new Set(), bond: new Set() };
   let selectedRosterId = null;
-  let rosterFilter = { q: '', prof: new Set(), rarity: new Set(), trigger: new Set(), bond: 'all' };
+  let detailModulePick = {};
+  let rosterFilter = { q: '', trigger: new Set(), kind: new Set(), bond: new Set() };
   const TRIGGER_DEFS = [
     { id: 'battle', label: '战斗中', re: /战斗中/ },
     { id: 'obtain', label: '获得时', re: /获得时/ },
@@ -81,8 +132,25 @@
     'doc', 'miracle', 'invest', 'mani', 'victoria', 'kazimierz', 'lethania',
     'visi', 'siracusa', 'egir', 'sargon', 'solo', 'iberia', 'indom', 'deputy', 'ursus', 'raid'
   ];
+  /* 盟约分两类（可露希尔Wiki 的两张表）：核心盟约 10 个，其余为附加盟约。
+     数据里没有这个字段，只能显式列；名单之外的（例如库里没人用的拉特兰）一律归附加。 */
+  const BOND_CORE_IDS = new Set([
+    'yan', 'sargon', 'victoria', 'kjerag', 'egir', 'siracusa',
+    'kazimierz', 'ursus', 'iberia', 'lethania'
+  ]);
+  const isCoreBond = (id) => BOND_CORE_IDS.has(id);
   const operatorTraitText = (o) => [o?.trait, o?.eliteTrait].filter(Boolean).join('\n');
   const operatorTriggers = (o) => TRIGGER_DEFS.filter((t) => t.re.test(operatorTraitText(o))).map((t) => t.id);
+  /* 特质开头那段就是卫戍能力的类型（持续叠加 / 单次叠加 / 作战能力 / 整备能力 / 特异化）。
+     数据里没有独立字段，只有文本前缀，所以按前缀解析，供筛选和样式复用。 */
+  const TRAIT_KINDS = ['持续叠加', '单次叠加', '作战能力', '整备能力', '特异化'];
+  function traitKinds(o) {
+    const found = [o?.trait, o?.eliteTrait]
+      .map((t) => String(t || '').trim())
+      .map((t) => TRAIT_KINDS.find((k) => t.startsWith(k)))
+      .filter(Boolean);
+    return [...new Set(found)];
+  }
   let equipmentQuery = '';
   let equipmentDetailKey = '';
   let itemPickerPreview = '';
@@ -157,11 +225,52 @@
   };
   const skillOf = (o) => (o?.skills || [])[Number(o?.skillIdx) || 0] || null;
   const skillIcon = (o) => { const s = skillOf(o); return s?.iconId ? (ASSETS['assets/skills/' + s.iconId + '.webp'] || ('assets/skills/' + s.iconId + '.webp')) : ''; };
-  const moduleType = (o) => String(o?.module?.type || '').split('-').pop() || '';
+  const moduleType = (o) => String(moduleOf(o)?.type || '').split('-').pop() || '';
+  function moduleOf(o) {
+    const id = o?.module?.id || (window.SP_MODULE_BY_OPERATOR || {})[o?.id];
+    const entry = id ? (window.SP_MODULES?.[id] || null) : null;
+    if (entry) {
+      return { ...(o?.module || {}), id: entry.id, name: o?.module?.name || entry.name, type: entry.type || o?.module?.type || '', icon: o?.module?.icon || entry.id };
+    }
+    return o?.module || null;
+  }
+  function moduleEntry(o) {
+    const id = o?.module?.id || (window.SP_MODULE_BY_OPERATOR || {})[o?.id];
+    return id ? (window.SP_MODULES?.[id] || null) : null;
+  }
   function moduleBadge(o, big) {
-    if (!o?.module) return '<span class="module-type empty' + (big ? ' big' : '') + '" title="无模组">—</span>';
+    const mod = moduleOf(o);
+    if (!mod) return '<span class="module-type empty' + (big ? ' big' : '') + '" title="无模组">—</span>';
     const t = moduleType(o) || '?';
-    return '<span class="module-type' + (big ? ' big' : '') + '" title="' + attr('模组 ' + t + '：' + o.module.name) + '">' + esc(t) + '</span>';
+    return '<span class="module-type' + (big ? ' big' : '') + '" title="' + attr('模组 ' + t + '：' + mod.name) + '">' + esc(t) + '</span>';
+  }
+  const ROMAN_TIERS = ['', 'I', 'II', 'III', 'IV', 'V', 'VI'];
+  function tierNumber(o) {
+    const m = String(o?.tier ?? '').trim().match(/^(VI|IV|V|III|II|I|\d+)/i);
+    if (!m) return 0;
+    const t = m[1].toUpperCase();
+    if (/^\d+$/.test(t)) return Math.max(0, Math.min(6, Number(t)));
+    return ROMAN_TIERS.indexOf(t);
+  }
+  const tierRoman = (o) => ROMAN_TIERS[tierNumber(o)] || '';
+  const formatSeconds = (v) => {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return '';
+    return (Number.isInteger(n) ? n.toFixed(1) : String(Number(n.toFixed(2)))) + 's';
+  };
+  /* 强袭数据把攻速放在 bat（攻击间隔/秒），补录数据放在 aspd（"1.2s"）；
+     部分旧数据还留着 aspd=100 的百分比值，这里统一成秒。 */
+  function attackInterval(st) {
+    const bat = Number(st?.bat);
+    if (Number.isFinite(bat) && bat > 0) return formatSeconds(bat);
+    const raw = String(st?.aspd ?? '').trim();
+    const m = raw.match(/^([0-9]+(?:\.[0-9]+)?)\s*(?:s|秒)?$/i);
+    if (m) {
+      const v = Number(m[1]);
+      if (v === 100) return '—';
+      return formatSeconds(v);
+    }
+    return raw || '—';
   }
   const skillNumeral = (idx) => ['Ⅰ', 'Ⅱ', 'Ⅲ'][Number(idx) || 0] || 'Ⅰ';
   const FACINGS = { right: 0, down: 90, left: 180, up: 270 };
@@ -319,6 +428,8 @@
     }
   }
 
+  // 调用方传精简形态（toStorageState）或原始旧存档，不要传完整 state：
+  // 完整 state 带着整份干员 / 羁绊资料库（约 340KB），三份备份就能把 localStorage 配额吃掉一大块。
   function backup(key, data) {
     try {
       const stamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -467,25 +578,25 @@
   }
 
   function hydrateState(stored) {
-    const base = clone(DEFAULT_DATA);
-    const out = clone(base);
+    // 整份默认数据只深拷贝一次：out.operators / out.bondLibrary / out.legacy 已经是独立副本，
+    // 不需要再各拷一遍（以前这里把 ~340KB 的资料库拷了三遍，每次载入 / 撤销 / 生成分享码都要付这笔账）。
+    const out = clone(DEFAULT_DATA);
+    const retired = DEFAULT_DATA.retiredOperatorIds || [];
     for (const k of ['meta', 'coreOperators', 'board', 'stages', 'equipment', 'equipmentNotes', 'bench', 'strategy']) {
       if (stored[k] !== undefined) out[k] = clone(stored[k]);
     }
-    out.operators = clone(base.operators);
     for (const [id, ov] of Object.entries(stored.operatorOverrides || {})) {
-      if ((base.retiredOperatorIds || []).includes(id)) continue;
+      if (retired.includes(id)) continue;
       if (out.operators[id]) out.operators[id] = { ...out.operators[id], ...clone(ov) };
       else out.operators[id] = clone(ov);
     }
     for (const [id, idx] of Object.entries(stored.loadout || {})) {
       if (out.operators[id]) out.operators[id].skillIdx = idx;
     }
-    out.bondLibrary = clone(base.bondLibrary);
     for (const [id, play] of Object.entries(stored.bondPlay || {})) {
       if (out.bondLibrary[id]) out.bondLibrary[id].play = play;
     }
-    out.legacy = deepMerge(base.legacy || {}, stored.legacy || {});
+    out.legacy = deepMerge(out.legacy || {}, stored.legacy || {});
     out.schemaVersion = 3;
     return out;
   }
@@ -589,35 +700,11 @@
       String(py.initials || '').toLowerCase().includes(q);
   }
   function operatorSort(a, b) {
-    return (Number(a.bench) - Number(b.bench)) || a.name.localeCompare(b.name, 'zh');
-  }
-  function matchGroupLabel(matched, total) {
-    const labels = matched.map((x) => x.label);
-    if (total === 1) return '命中 ' + labels[0];
-    if (matched.length === total) return '同时命中 ' + labels.join(' + ');
-    if (matched.length === 1) return '只命中 ' + labels[0];
-    return '命中 ' + labels.join(' + ');
-  }
-  function compareMatchSets(a, b) {
-    for (let i = 0; i < Math.min(a.length, b.length); i++) {
-      if (a[i].index !== b[i].index) return a[i].index - b[i].index;
-    }
-    return a.length - b.length;
+    return (Number(a.bench) - Number(b.bench)) || (tierNumber(a) - tierNumber(b)) || a.name.localeCompare(b.name, 'zh');
   }
   function buildMatchGroups(ops, selected) {
-    if (!selected.length) return [{ key: 'all', matched: [], label: '全部干员', ops: ops.slice() }];
-    const map = new Map();
-    for (const o of ops) {
-      const matched = selected.filter((x) => x.test(o));
-      if (!matched.length) continue;
-      const key = matched.map((x) => x.index).join(',');
-      if (!map.has(key)) map.set(key, { key, matched, ops: [] });
-      map.get(key).ops.push(o);
-    }
-    const groups = [...map.values()];
-    groups.sort((a, b) => (b.matched.length - a.matched.length) || compareMatchSets(a.matched, b.matched));
-    for (const g of groups) g.label = matchGroupLabel(g.matched, selected.length);
-    return groups;
+    const matched = selected.length ? ops.filter((o) => selected.some((x) => x.test(o))) : ops.slice();
+    return [{ key: 'all', matched: selected, label: selected.length ? '筛选结果' : '全部干员', ops: matched }];
   }
 
   function currentBondEntries() {
@@ -801,12 +888,8 @@
       '</div>';
     };
     const sep = '<div class="bond-sep"></div>';
-    let rows = '';
-    if (twoCol) {
-      rows = reached.map(row).join('') + (unreached.length ? sep : '') + unreached.map(row).join('');
-    } else {
-      rows = reached.map(row).join('') + (unreached.length ? sep : '') + unreached.map(row).join('');
-    }
+    // 单列 / 双列的行内容完全一样，区别只在容器上的 .two-col
+    const rows = reached.map(row).join('') + (unreached.length ? sep : '') + unreached.map(row).join('');
     return '<section class="panel bonds-panel">' +
       '<div class="panel-head"><span class="panel-title">羁绊</span></div>' +
       '<div class="bond-list' + (twoCol ? ' two-col' : '') + '">' + rows + '</div>' +
@@ -894,14 +977,16 @@
   const strategyById = (id) => state.strategyLibrary?.[id] || null;
   const STRATEGY_EFFECT_H = 108;
   let strategyProbe = null;
-  function measureStrategyText(text, width) {
+  function measureStrategyText(text, width, decorated = false) {
     if (!strategyProbe) {
       strategyProbe = document.createElement('div');
       strategyProbe.className = 'strategy-effect-measure';
       document.body.appendChild(strategyProbe);
     }
     strategyProbe.style.width = width + 'px';
-    strategyProbe.textContent = text;
+    // 面板里渲染的是关键词高亮后的 HTML，量高度时也要量同一份标记，否则徽章内边距会让最后一行溢出。
+    if (decorated) strategyProbe.innerHTML = rich(text);
+    else strategyProbe.textContent = text;
     return strategyProbe.scrollHeight;
   }
   const maxCharsCache = new Map();
@@ -920,7 +1005,7 @@
   const strategyBrief = (id) => state.strategyBrief?.[id] || DEFAULT_DATA.strategyBrief?.[id] || '';
   function trimStrategyText(text, width) {
     let t = String(text || '').trim();
-    while (t.length > 1 && measureStrategyText(t, width) > STRATEGY_EFFECT_H) {
+    while (t.length > 1 && measureStrategyText(t, width, true) > STRATEGY_EFFECT_H) {
       const cut = Math.max(t.lastIndexOf('；'), t.lastIndexOf('。'), t.lastIndexOf('，'), t.lastIndexOf(' '));
       t = (cut > 0 ? t.slice(0, cut) : t.slice(0, -1)).trim();
     }
@@ -933,19 +1018,19 @@
     const brief = strategyBrief(s.id);
     let text = '';
     let mode = 'full';
-    if (summary && measureStrategyText(summary, width) <= STRATEGY_EFFECT_H) { text = summary; mode = 'summary'; }
-    else if (measureStrategyText(full, width) <= STRATEGY_EFFECT_H) { text = full; }
+    if (summary && measureStrategyText(summary, width, true) <= STRATEGY_EFFECT_H) { text = summary; mode = 'summary'; }
+    else if (measureStrategyText(full, width, true) <= STRATEGY_EFFECT_H) { text = full; }
     else if (brief) { text = brief; mode = 'brief'; }
     else { text = full; mode = 'brief'; }
-    if (measureStrategyText(text, width) > STRATEGY_EFFECT_H) text = trimStrategyText(text, width);
-    return { width, summary, full, brief, text, mode, maxChars: maxCharsFor(width), fit: true, height: measureStrategyText(text, width), overflowPx: 0 };
+    if (measureStrategyText(text, width, true) > STRATEGY_EFFECT_H) text = trimStrategyText(text, width);
+    return { width, summary, full, brief, text, mode, maxChars: maxCharsFor(width), fit: true, height: measureStrategyText(text, width, true), overflowPx: 0 };
   }
   function strategyEffectHtml(s, st, kind, altsCount) {
     const info = strategySlotInfo(s, st, kind, altsCount);
     const cls = 'strategy-effect-' + (kind === 'main' ? 'main' : 'secondary');
     return {
       info,
-      html: '<div class="' + cls + '">' + esc(info.text) + '</div>',
+      html: '<div class="' + cls + '">' + rich(info.text) + '</div>',
       warning: '',
       note: info.mode !== 'full' && editMode ? '<div class="strategy-brief-note">精要版 · 点名称看完整效果</div>' : ''
     };
@@ -994,16 +1079,19 @@
       (editMode ? '<button class="strategy-alt-add edit-only" type="button" data-strategy-alt-add>+ 次选</button>' : '') +
     '</section>';
   }
-  function openStrategy(id) {
+  function openStrategy(id, anchor) {
     const s = strategyById(id);
     if (!s) { toast('策略数据缺失', true); return; }
-    const body = '<div class="modal-body strategy-detail">' +
-      '<div class="detail-hero"><img class="detail-avatar" src="' + strategyIcon(s) + '" alt="" /><div><div class="detail-kicker">STRATEGY / ' + strategyKind(s) + '</div><h2 class="detail-name">' + esc(s.name) + '</h2><div class="detail-role">HP ' + esc(s.initialHp ?? '—') + ' · ' + strategyKind(s) + '</div>' +
-      (s.unlock ? '<p class="detail-note">解锁：' + esc(s.unlock) + '</p>' : '') + '</div></div>' +
-      '<div class="detail-sections"><section class="detail-section"><h4>效果</h4><p class="strategy-effect">' + esc(s.effect) + '</p></section></div>' +
-      (s.source ? '<p class="detail-note">来源：<a href="' + attr(s.source) + '" target="_blank" rel="noreferrer">' + esc(s.sourceName || '来源') + '</a></p>' : '') +
-    '</div>';
-    openModal(body);
+    const html = '<div class="info-pop-head">' +
+        '<img src="' + strategyIcon(s) + '" alt="" draggable="false" />' +
+        '<div><div class="detail-kicker">STRATEGY / ' + strategyKind(s) + '</div><h3>' + esc(s.name) + '</h3>' +
+        '<div class="info-pop-meta">HP ' + esc(s.initialHp ?? '—') + ' · ' + strategyKind(s) + ' · 解锁：' + esc(s.unlock || '无') + '</div></div>' +
+      '</div>' +
+      '<p class="strategy-effect info-pop-text">' + rich(s.effect || '') + '</p>' +
+      (s.source ? '<p class="detail-note">来源：<a href="' + attr(s.source) + '" target="_blank" rel="noreferrer">' + esc(s.sourceName || '来源') + '</a></p>' : '');
+    // 手机端屏幕窄，完整策略效果放在全屏卡片里读；桌面端仍用轻量浮层。
+    if (mobileUI) openModal('<div class="modal-body">' + html + '</div>');
+    else openInfoPop(anchor || null, html);
   }
   function strategyPickerDetailHtml(s) {
     if (!s) return '<div class="strategy-picker-empty">点左侧策略查看详细效果</div>';
@@ -1019,7 +1107,7 @@
         '<div class="strategy-picker-meta">HP ' + esc(s.initialHp ?? '—') + ' · ' + strategyKind(s) + (chosen ? ' · 当前已选' : '') + '</div></div>' +
       '</div>' +
       '<p class="strategy-picker-unlock">' + (s.unlock ? '解锁：' + esc(s.unlock) : '解锁：无') + '</p>' +
-      '<div class="strategy-picker-full"><h4>完整效果</h4><p>' + esc(s.effect || '') + '</p></div>' +
+      '<div class="strategy-picker-full"><h4>完整效果</h4><p>' + rich(s.effect || '') + '</p></div>' +
       '<button class="btn btn-primary strategy-picker-choose" type="button" data-strategy-choose="' + attr(s.id) + '"' + (disabled ? ' disabled' : '') + '>' + esc(label) + '</button>' +
       (s.source ? '<p class="detail-note">来源：<a href="' + attr(s.source) + '" target="_blank" rel="noreferrer">' + esc(s.sourceName || '来源') + '</a></p>' : '');
   }
@@ -1243,16 +1331,138 @@
   /* ------------------------------------------------------------
      Persistence / edit toggle
      ------------------------------------------------------------ */
-  function updateSaveState() {
+  // 右上角的保存状态，四种：
+  //   idle    刚打开，还没有任何改动（以前这里一打开就写「已自动保存 HH:MM」，其实什么都没存）
+  //   pending 文字改动已记下，等输入停顿后写入
+  //   saved   已写入本机，带时间
+  //   error   写入失败（存储满 / 隐私模式），改动只在当前页面里
+  function setSaveState(kind) {
     const el = $('#saveState');
     if (!el) return;
-    const d = new Date();
-    el.textContent = '已自动保存 ' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+    el.dataset.state = kind;
+    if (kind === 'saved') {
+      const d = new Date();
+      el.textContent = '已自动保存 ' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+    } else if (kind === 'pending') el.textContent = '保存中…';
+    else if (kind === 'error') el.textContent = '未保存 · 本机存储写入失败';
+    else el.textContent = '改动自动保存在本机';
   }
+
+  /* ------------------------------------------------------------
+     撤销 / 重做
+     所有改动最后都会走 saveNow()，所以历史直接挂在这里：每次写入时把
+     精简存档（toStorageState，约 4KB 的字符串）和上一份比较，不同就记一步。
+     不用在几十个操作里各自埋点，新加的操作只要照常 saveNow() 就自动可撤销。
+     ------------------------------------------------------------ */
+  const HISTORY_LIMIT = 80;
+  const HISTORY_MERGE_MS = 2500;
+  const HISTORY_ICON = {
+    undo: '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M9 14 4 9l5-5M4 9h10a6 6 0 0 1 0 12h-3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+    redo: '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="m15 14 5-5-5-5M20 9H10a6 6 0 0 0 0 12h3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+  };
+  // 注意别叫 history：会遮住 window.history，分享链接清理 hash 要用它
+  const timeline = { past: [], future: [], current: null, tag: '', at: 0 };
+  let historyTag = '';
+  let historyLock = false;
+
+  function recordHistory(snap) {
+    const tag = historyTag;
+    historyTag = '';
+    if (historyLock || timeline.current === null) return;
+    // 棋子刚放下、朝向还没定，只是半步：等「确定朝向」或「撤销放入」之后再记
+    if (pendingPlacement) return;
+    if (snap === timeline.current) return;
+    const now = Date.now();
+    // 连续敲同一段文字合并成一步，不然撤销要一个字一个字退
+    const merge = !!tag && tag === timeline.tag && now - timeline.at < HISTORY_MERGE_MS;
+    if (!merge) {
+      timeline.past.push(timeline.current);
+      if (timeline.past.length > HISTORY_LIMIT) timeline.past.shift();
+    }
+    timeline.current = snap;
+    timeline.tag = tag;
+    timeline.at = now;
+    timeline.future.length = 0;
+    syncHistoryUi();
+  }
+  function initHistory() {
+    timeline.past.length = 0;
+    timeline.future.length = 0;
+    timeline.current = JSON.stringify(toStorageState(state));
+    timeline.tag = '';
+    syncHistoryUi();
+  }
+  function historyAttrs(kind) {
+    const n = kind === 'undo' ? timeline.past.length : timeline.future.length;
+    const label = kind === 'undo' ? '撤销' : '重做';
+    const key = kind === 'undo' ? 'Ctrl+Z' : 'Ctrl+Y';
+    return {
+      disabled: n ? 'false' : 'true',
+      title: n ? label + '（' + key + '）· 可' + label + ' ' + n + ' 步' : '没有可' + label + '的操作'
+    };
+  }
+  function syncHistoryUi() {
+    $$('[data-history]').forEach((btn) => {
+      const a = historyAttrs(btn.dataset.history);
+      btn.setAttribute('aria-disabled', a.disabled);
+      btn.title = a.title;
+    });
+  }
+  function restoreSnapshot(snap) {
+    historyLock = true;
+    try {
+      if (pendingPlacement) cancelPendingPlacement(true);
+      state = hydrateState(JSON.parse(snap));
+      setSaveState(safeSet(STORAGE_KEY, snap) ? 'saved' : 'error');
+      // 这些界面状态指向的是旧数据里的棋子 / 装备格，一起清掉，免得指到已经不存在的东西
+      closeInfoPop();
+      closeDetailDrawer();
+      mobileRange = null;
+      mobileRangeArmed = false;
+      mobileEquipOpen = null;
+      renderPoster();
+      renderRoster();
+      renderVariants();
+      if (!$('#equipmentDrawer')?.hidden) renderEquipmentLibrary();
+    } finally {
+      historyLock = false;
+    }
+  }
+  function stepHistory(kind) {
+    // 朝向还没定的时候按撤销，就是「撤销放入」
+    if (kind === 'undo' && pendingPlacement) { cancelPendingPlacement(); return; }
+    if (saveTimer) saveNow();   // 还在防抖里的文字先落盘，保证它是历史里的一步
+    const from = kind === 'undo' ? timeline.past : timeline.future;
+    const to = kind === 'undo' ? timeline.future : timeline.past;
+    const label = kind === 'undo' ? '撤销' : '重做';
+    if (!from.length) { toast('没有可' + label + '的操作'); return; }
+    to.push(timeline.current);
+    timeline.current = from.pop();
+    timeline.tag = '';
+    try {
+      restoreSnapshot(timeline.current);
+    } catch (e) {
+      console.error(e);
+      toast(label + '失败：' + (e.message || e.name), true);
+    }
+    syncHistoryUi();
+    toast(kind === 'undo'
+      ? '已撤销' + (timeline.past.length ? ' · 还可再退 ' + timeline.past.length + ' 步' : ' · 已回到最初')
+      : '已重做' + (timeline.future.length ? ' · 还可重做 ' + timeline.future.length + ' 步' : ''));
+  }
+
   function saveNow() {
-    if (safeSet(STORAGE_KEY, JSON.stringify(toStorageState(state)))) updateSaveState();
+    clearTimeout(saveTimer);
+    saveTimer = 0;
+    const snap = JSON.stringify(toStorageState(state));
+    const ok = safeSet(STORAGE_KEY, snap);
+    recordHistory(snap);
+    setSaveState(ok ? 'saved' : 'error');
   }
-  function saveSoon() {
+  // tag：同一个 tag 的连续保存会合并成一步撤销（传入正在编辑的字段路径）
+  function saveSoon(tag) {
+    if (tag) historyTag = tag;
+    setSaveState('pending');
     clearTimeout(saveTimer);
     saveTimer = setTimeout(saveNow, 220);
   }
@@ -1267,6 +1477,8 @@
 
   function toggleEdit() {
     if (pendingPlacement) cancelPendingPlacement(true);
+    closeInfoPop();
+    closeDetailDrawer();
     editMode = !editMode;
     document.body.classList.toggle('editing', editMode);
     const bar = $('#editBar');
@@ -1287,8 +1499,18 @@
   /* ------------------------------------------------------------
      Modal
      ------------------------------------------------------------ */
+  // 弹窗关掉后把键盘焦点还给打开它的那个按钮。只记按钮类元素：
+  // 可编辑文字不记（还回去会弹出手机键盘 / 触发截断检查），已被重新渲染掉的元素自然跳过。
+  let modalReturnFocus = null;
+  const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
   function openModal(html, wide) {
+    closeInfoPop();
+    closeDetailDrawer();
     const root = $('#modalRoot');
+    if (!$('.modal')) {
+      const a = document.activeElement;
+      modalReturnFocus = a && a !== document.body && !a.isContentEditable && a.matches('button, a[href], [role="button"]') ? a : null;
+    }
     root.innerHTML = '<div class="modal" role="presentation">' +
       '<div class="modal-backdrop" data-close></div>' +
       '<div class="modal-panel ' + (wide ? 'wide' : '') + '" role="dialog" aria-modal="true">' +
@@ -1298,12 +1520,143 @@
     setTimeout(() => { const b = $('.modal-close'); if (b) b.focus(); }, 20);
   }
   function closeModal() {
+    const wasOpen = !!$('.modal');
     $('#modalRoot').innerHTML = '';
     document.body.classList.remove('modal-open');
+    const back = modalReturnFocus;
+    modalReturnFocus = null;
+    if (wasOpen && back && back.isConnected && !mobileUI) {
+      try { back.focus({ preventScroll: true }); } catch (e) { /* 元素已不可聚焦 */ }
+    }
+  }
+  // Tab 在弹窗里循环，不会跑到被遮住的海报和抽屉上。词条浮层盖在弹窗上面时，以浮层为准。
+  function trapModalFocus(e) {
+    const panel = $('.modal-panel');
+    if (!panel) return false;
+    const shown = (el) => el.getClientRects().length > 0;   // fixed 定位的元素 offsetParent 恒为 null，不能拿它判断可见
+    const over = $('.info-pop.over-modal');
+    const box = over && shown(over) ? over : panel;
+    const items = $$(FOCUSABLE, box).filter(shown);
+    if (!items.length) { e.preventDefault(); return true; }
+    const first = items[0];
+    const last = items[items.length - 1];
+    const cur = document.activeElement;
+    if (!box.contains(cur)) { e.preventDefault(); (e.shiftKey ? last : first).focus(); return true; }
+    if (e.shiftKey && cur === first) { e.preventDefault(); last.focus(); return true; }
+    if (!e.shiftKey && cur === last) { e.preventDefault(); first.focus(); return true; }
+    return false;
+  }
+
+  /* ------------------------------------------------------------
+     干员详情抽屉：桌面端不用弹窗，右侧停靠，海报让位（fitPoster 重算缩放）。
+     手机上屏幕放不下两栏，仍走全屏卡片。
+     ------------------------------------------------------------ */
+  function ensureDetailDrawer() {
+    let el = $('#detailDrawer');
+    if (el) return el;
+    el = document.createElement('aside');
+    el.id = 'detailDrawer';
+    el.className = 'detail-drawer';
+    el.setAttribute('aria-label', '干员详情');
+    el.innerHTML = '<div class="detail-drawer-head"><strong>干员详情</strong>' +
+      '<button class="drawer-close" type="button" data-detail-close aria-label="关闭详情">×</button></div>' +
+      '<div class="detail-drawer-body" id="detailDrawerBody"></div>';
+    document.body.appendChild(el);
+    return el;
+  }
+  function openDetailDrawer(html) {
+    const el = ensureDetailDrawer();
+    const body = $('#detailDrawerBody');
+    if (body) body.innerHTML = html;
+    el.classList.add('open');
+    document.body.classList.add('detail-open');
+    requestAnimationFrame(fitPoster);
+  }
+  function closeDetailDrawer() {
+    const el = $('#detailDrawer');
+    if (!el || !el.classList.contains('open')) return;
+    el.classList.remove('open');
+    const body = $('#detailDrawerBody');
+    if (body) body.innerHTML = '';
+    document.body.classList.remove('detail-open');
+    fitPoster();
+  }
+
+  /* ------------------------------------------------------------
+     轻量信息浮层：贴在被点的元素旁边，不压暗、不锁滚动、不抢焦点。
+     海报是固定 1600×1200 画布，面板行高都写死了，行内展开会把下面的行挤出去，
+     所以详情只能做成浮层；点空白 / 再点一次 / Esc 关闭。
+     ------------------------------------------------------------ */
+  let infoPop = null;
+  let infoPopAnchor = null;
+  function closeInfoPop() {
+    if (!infoPop) return;
+    infoPop.remove();
+    infoPop = null;
+    infoPopAnchor = null;
+    termStack = [];
+    termAnchor = null;
+    document.removeEventListener('pointerdown', onInfoPopOutside, true);
+    window.removeEventListener('resize', placeInfoPop);
+    window.removeEventListener('scroll', placeInfoPop, true);
+  }
+  function placeInfoPop() {
+    if (!infoPop || infoPop.classList.contains('sheet')) return;
+    const pop = infoPop;
+    pop.style.left = '0px';
+    pop.style.top = '0px';
+    const w = pop.offsetWidth;
+    const h = pop.offsetHeight;
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    if (!infoPopAnchor || !document.body.contains(infoPopAnchor)) {
+      pop.style.left = Math.round(Math.max(12, (vw - w) / 2)) + 'px';
+      pop.style.top = Math.round(Math.max(12, (vh - h) / 2)) + 'px';
+      return;
+    }
+    const r = infoPopAnchor.getBoundingClientRect();
+    let left = r.right + 12;
+    if (left + w > vw - 12) left = r.left - w - 12;
+    if (left < 12) left = Math.max(12, Math.min(vw - w - 12, r.left));
+    const top = Math.min(Math.max(12, r.top), Math.max(12, vh - h - 12));
+    pop.style.left = Math.round(left) + 'px';
+    pop.style.top = Math.round(top) + 'px';
+  }
+  function onInfoPopOutside(e) {
+    if (!infoPop) return;
+    if (infoPop.contains(e.target)) return;
+    if (infoPopAnchor && infoPopAnchor.contains(e.target)) return;
+    /* 手机底部浮层是 fixed 的轻量面板：点空白只负责“关掉它”，
+       别让同一个手势继续点到底下的羁绊行 / 棋子 / 头像。
+       明确的“关闭”按钮和另一个词条链接除外：前者应该一次关掉，
+       后者允许直接切换词条，不用先关再点。 */
+    if (infoPop.classList.contains('sheet') &&
+        !e.target.closest('[data-term-bond], [data-term-equip], [data-term-kind]') &&
+        !e.target.closest('[data-close], [data-detail-close], [data-info-pop-close]')) {
+      suppressClickUntil = Date.now() + 350;
+    }
+    closeInfoPop();
+  }
+  function openInfoPop(anchor, html) {
+    if (infoPop && anchor && infoPopAnchor === anchor) { closeInfoPop(); return; }
+    closeInfoPop();
+    const el = document.createElement('div');
+    el.className = 'info-pop';
+    if (mobileUI || window.matchMedia('(max-width: 720px)').matches) el.classList.add('sheet');
+    el.setAttribute('role', 'dialog');
+    el.setAttribute('aria-label', '详情');
+    el.innerHTML = '<button class="info-pop-close" type="button" data-info-pop-close aria-label="关闭">×</button>' + html;
+    document.body.appendChild(el);
+    infoPop = el;
+    infoPopAnchor = anchor || null;
+    placeInfoPop();
+    document.addEventListener('pointerdown', onInfoPopOutside, true);
+    window.addEventListener('resize', placeInfoPop);
+    window.addEventListener('scroll', placeInfoPop, true);
   }
   function section(label, text) {
     if (!text) return '';
-    return '<section class="detail-section"><h4>' + esc(label) + '</h4><p>' + esc(text) + '</p></section>';
+    return '<section class="detail-section"><h4>' + esc(label) + '</h4><p>' + rich(text) + '</p></section>';
   }
   function bondMini(id, interactive = true) {
     const b = bond(id);
@@ -1313,6 +1666,250 @@
       return '<span class="bond-mini static" title="' + attr(b.name + '\n' + effectText) + '"><img src="' + bondIcon(id) + '" alt="" />' + esc(b.name) + '</span>';
     }
     return '<button class="bond-mini" type="button" data-bond-id="' + attr(id) + '" title="' + attr(b.name + '\n' + effectText) + '"><img src="' + bondIcon(id) + '" alt="" />' + esc(b.name) + '</button>';
+  }
+
+  /* ------------------------------------------------------------
+     词条关联：正文里的【羁绊】、“装备”、特质类型变成可点词条。
+     规则只认数据里真实存在的名字，避免把普通文本都做成链接；
+     所有词条共用一个浮层，点进去是“替换”而不是层层叠加，
+     最多保留 3 层历史，可「← 返回」逐层退回。
+     ------------------------------------------------------------ */
+  const TERM_STACK_MAX = 3;
+  let termStack = [];
+  let termAnchor = null;
+
+  function bondIdByName(name) {
+    const target = String(name || '').trim();
+    if (!target) return '';
+    const found = Object.entries(state.bondLibrary || {}).find(([, b]) => b && b.name === target);
+    return found ? found[0] : '';
+  }
+  function equipmentKeyByName(name) {
+    const target = String(name || '').trim();
+    if (!target) return '';
+    return Object.keys(ITEM_META).find((k) => ITEM_META[k] === target) || '';
+  }
+  function termBondButton(id) {
+    const b = bond(id);
+    if (!b) return '';
+    return '<button type="button" class="term-link term-bond" data-term-bond="' + attr(id) + '" title="' +
+      attr('查看羁绊「' + b.name + '」：档位效果与含有的干员') + '">' +
+      '<span class="kw-name"><i>【</i>' + esc(b.name) + '<i>】</i></span></button>';
+  }
+  function termEquipButton(key) {
+    if (!ITEM_META[key]) return '';
+    return '<button type="button" class="term-link term-equip" data-term-equip="' + attr(key) + '" title="' +
+      attr('查看装备「' + ITEM_META[key] + '」') + '">' +
+      '<img class="term-equip-icon" src="' + attr(itemSrc(key)) + '" alt="" draggable="false" />' +
+      esc(ITEM_META[key]) + '</button>';
+  }
+  function termKindButton(kind) {
+    const cls = kind === '持续叠加' ? 'kw-stack' : (kind === '单次叠加' ? 'kw-stack once' : 'term-kind-word');
+    return '<button type="button" class="term-link term-kind" data-term-kind="' + attr(kind) + '" title="' +
+      attr('查看「' + kind + '」类型特质与干员') + '"><span class="' + cls + '">' + esc(kind) + '</span></button>';
+  }
+  const TERM_LINK_RE = new RegExp(
+    '“[^”\\r\\n]{1,24}”|「[^」\\r\\n]{1,24}」|<(?:' + PHASE_TAGS.join('|') + ')>|【[^【】\\r\\n]{1,16}】|' +
+    TRAIT_KINDS.join('|') + '|已激活的', 'g');
+  function termLinkToken(tok, index) {
+    const first = tok.charAt(0);
+    if (first === '“' || first === '「') {
+      const name = tok.slice(1, -1).trim();
+      const key = equipmentKeyByName(name);
+      if (key) return esc(first) + termEquipButton(key) + esc(tok.charAt(tok.length - 1));
+      return esc(tok);
+    }
+    if (first === '【') {
+      const id = bondIdByName(tok.slice(1, -1));
+      return id ? termBondButton(id) : richToken(tok);
+    }
+    if (TRAIT_KINDS.includes(tok)) {
+      return index === 0 ? termKindButton(tok) : richToken(tok);
+    }
+    return richToken(tok);
+  }
+  /* 和 rich() 同样的安全分段：先匹配、再分段转义，只有识别出的词条才输出按钮。 */
+  function linkedRich(v) {
+    const text = String(v ?? '');
+    let out = '', last = 0, m;
+    TERM_LINK_RE.lastIndex = 0;
+    while ((m = TERM_LINK_RE.exec(text))) {
+      out += esc(text.slice(last, m.index)) + termLinkToken(m[0], m.index);
+      last = m.index + m[0].length;
+    }
+    return out + esc(text.slice(last));
+  }
+
+  function operatorBoardOrder() {
+    const order = new Map();
+    const placements = [...(state.board?.placements || [])].sort((a, b) => (a.row - b.row) || (a.col - b.col));
+    for (const p of placements) {
+      if (p && !order.has(p.operatorId)) order.set(p.operatorId, order.size);
+    }
+    return order;
+  }
+  function sortedTermOps(ops) {
+    const order = operatorBoardOrder();
+    return ops.slice().sort((a, b) => {
+      const ao = order.has(a.id) ? order.get(a.id) : 999;
+      const bo = order.has(b.id) ? order.get(b.id) : 999;
+      return (ao - bo) || ((Number(a.bench) || 0) - (Number(b.bench) || 0)) ||
+        String(a.name || a.id).localeCompare(String(b.name || b.id), 'zh');
+    });
+  }
+  function termOpsGridHtml(ops, noteFor) {
+    const order = operatorBoardOrder();
+    return ops.map((o) => {
+      const onBoard = order.has(o.id);
+      const note = noteFor ? noteFor(o) : '';
+      const title = (o.name || o.id) + (onBoard ? ' · 棋盘上' : '') + (note ? ' · ' + note : '');
+      return '<button class="info-pop-op' + (onBoard ? ' on-board' : '') + '" type="button" data-term-op="' + attr(o.id) + '" title="' + attr(title) + '">' +
+        '<img src="' + attr(avatarSrc(o.avatar)) + '" alt="" draggable="false" style="border-color:' + rarityColor(o) + '" />' +
+        '<span>' + esc(o.name || o.id) + '</span>' +
+        (note ? '<em>' + esc(note) + '</em>' : '') +
+        (onBoard ? '<i>在场</i>' : '') +
+      '</button>';
+    }).join('');
+  }
+  function bondOperators(id) {
+    return sortedTermOps(Object.values(state.operators || {}).filter((o) => (o.bonds || []).includes(id)));
+  }
+  function bondOpsSectionHtml(id) {
+    const ops = bondOperators(id);
+    const onBoard = new Set((state.board?.placements || []).map((p) => p.operatorId));
+    const boardCount = ops.filter((o) => onBoard.has(o.id)).length;
+    return '<div class="info-pop-ops">' +
+      '<div class="info-pop-ops-head"><b>含有的干员</b><span>棋盘 ' + boardCount + ' · 名册 ' + ops.length + '</span></div>' +
+      (ops.length ? '<div class="info-pop-ops-grid">' + termOpsGridHtml(ops) + '</div>' : '<p class="detail-note">名册内没有该羁绊干员。</p>') +
+    '</div>';
+  }
+  function equipmentOpsSectionHtml(key) {
+    const uses = equipmentUses(key);
+    const byOp = new Map();
+    for (const use of uses) {
+      if (!byOp.has(use.row.operatorId)) byOp.set(use.row.operatorId, []);
+      byOp.get(use.row.operatorId).push(use.slot);
+    }
+    const slotLabel = { must: '必做', big: '大提升', optional: '可选' };
+    const ops = [];
+    for (const id of byOp.keys()) {
+      const o = op(id);
+      if (o) ops.push(o);
+    }
+    const sorted = sortedTermOps(ops);
+    return '<div class="info-pop-ops">' +
+      '<div class="info-pop-ops-head"><b>本套装备于</b><span>' + uses.length + ' 处</span></div>' +
+      (sorted.length
+        ? '<div class="info-pop-ops-grid">' + termOpsGridHtml(sorted, (o) => (byOp.get(o.id) || []).map((s) => slotLabel[s] || s).join(' / ')) + '</div>'
+        : '<p class="detail-note">本套阵容还没有装备这件。</p>') +
+    '</div>';
+  }
+  function equipmentTermInfoHtml(key) {
+    if (!ITEM_META[key]) return '';
+    const eff = equipmentEffect(key) || {};
+    return '<div class="info-pop-head">' +
+        '<img src="' + itemSrc(key) + '" alt="" draggable="false" />' +
+        '<div><div class="detail-kicker">EQUIP / ITEM</div><h3>' + esc(ITEM_META[key]) + '</h3>' +
+        '<div class="info-pop-meta">装备 · 当前 ' + equipmentUses(key).length + ' 处装备</div></div>' +
+      '</div>' +
+      '<div class="info-pop-effect"><b>基础效果</b><p>' + esc(eff.base || '暂无数据') + '</p></div>' +
+      (eff.advanced ? '<div class="info-pop-effect"><b>进阶效果</b><p>' + esc(eff.advanced) + '</p></div>' : '') +
+      equipmentOpsSectionHtml(key) +
+      '<p class="detail-note">数据：可露希尔Wiki；卫戍协议内以游戏为准。</p>';
+  }
+  function kindTermInfoHtml(kind) {
+    const ops = sortedTermOps(Object.values(state.operators || {}).filter((o) => traitKinds(o).includes(kind)));
+    return '<div class="info-pop-head">' +
+        '<div><div class="detail-kicker">TRAIT / TYPE</div><h3>' + esc(kind) + '</h3>' +
+        '<div class="info-pop-meta">特质类型 · 名册内 ' + ops.length + ' 名干员</div></div>' +
+      '</div>' +
+      '<p class="detail-note">按特质文本开头的类型词归类；点干员查看完整特质。</p>' +
+      (ops.length ? '<div class="info-pop-ops-grid">' + termOpsGridHtml(ops) + '</div>' : '<p class="detail-note">名册内没有该类型特质。</p>');
+  }
+  function normalizeTermEntry(entry) {
+    if (!entry) return null;
+    if (entry.kind === 'bond') {
+      const b = bond(entry.id);
+      return b ? { kind: 'bond', id: entry.id, label: b.name } : null;
+    }
+    if (entry.kind === 'equip') {
+      return ITEM_META[entry.id] ? { kind: 'equip', id: entry.id, label: ITEM_META[entry.id] } : null;
+    }
+    if (entry.kind === 'kind') {
+      return TRAIT_KINDS.includes(entry.id) ? { kind: 'kind', id: entry.id, label: entry.id } : null;
+    }
+    return null;
+  }
+  function termEntryHtml(entry) {
+    if (entry.kind === 'bond') return bondInfoHtml(entry.id);
+    if (entry.kind === 'equip') return equipmentTermInfoHtml(entry.id);
+    if (entry.kind === 'kind') return kindTermInfoHtml(entry.id);
+    return '';
+  }
+  function termPopHtml() {
+    const entry = termStack[termStack.length - 1];
+    if (!entry) return '';
+    const back = termStack.length > 1
+      ? '<button class="term-back" type="button" data-term-back title="返回上一词条">← 返回</button>'
+      : '';
+    return back + termEntryHtml(entry);
+  }
+  function bindBondPlayInputs() {
+    if (!infoPop) return;
+    $$('[data-bond-play]', infoPop).forEach((play) => {
+      if (play.dataset.bound === '1') return;
+      play.dataset.bound = '1';
+      play.addEventListener('input', () => { const b = bond(play.dataset.bondPlay); if (b) b.play = play.innerText; saveSoon('bondPlay:' + play.dataset.bondPlay); });
+      play.addEventListener('blur', saveNow);
+    });
+  }
+  function showTermPop(anchor, fresh) {
+    if (!fresh && infoPop && infoPop.classList.contains('term-pop')) {
+      infoPop.innerHTML = '<button class="info-pop-close" type="button" data-info-pop-close aria-label="关闭">×</button>' + termPopHtml();
+      infoPop.scrollTop = 0;
+      bindBondPlayInputs();
+      placeInfoPop();
+      return;
+    }
+    openInfoPop(anchor || null, termPopHtml());
+    if (!infoPop) return;
+    infoPop.classList.add('term-pop');
+    if ($('.modal')) infoPop.classList.add('over-modal');
+    bindBondPlayInputs();
+  }
+  function openTermEntry(entry, anchor, opts = {}) {
+    const normalized = normalizeTermEntry(entry);
+    if (!normalized) return;
+    const top = termStack[termStack.length - 1];
+    const canPush = !!opts.push && !!infoPop && infoPop.classList.contains('term-pop');
+    if (canPush) {
+      if (top && top.kind === normalized.kind && top.id === normalized.id) return;
+      termStack.push(normalized);
+      if (termStack.length > TERM_STACK_MAX) termStack.shift();
+      showTermPop(termAnchor, false);
+      return;
+    }
+    closeInfoPop();
+    termStack = [normalized];
+    termAnchor = anchor || null;
+    showTermPop(termAnchor, true);
+  }
+  function termBack() {
+    if (termStack.length > 1) {
+      termStack.pop();
+      showTermPop(termAnchor, false);
+    } else {
+      closeInfoPop();
+    }
+  }
+  function openBondTerm(id, anchor, push = false) {
+    openTermEntry({ kind: 'bond', id }, anchor, { push });
+  }
+  function openEquipTerm(key, anchor, push = false) {
+    openTermEntry({ kind: 'equip', id: key }, anchor, { push });
+  }
+  function openKindTerm(kind, anchor, push = false) {
+    openTermEntry({ kind: 'kind', id: kind }, anchor, { push });
   }
 
   function rangeHtml(grid, facing = 'up', placed = false) {
@@ -1349,41 +1946,69 @@
     const st = o.stats || {};
     const stats = [
       ['生命', st.maxHp], ['攻击', st.atk], ['防御', st.def], ['法抗', st.res],
-      ['阻挡', st.blockCnt], ['攻速', st.aspd], ['部署费', st.cost]
-    ].map(([label, value]) => '<div class="stat"><span>' + esc(label) + '</span><b>' + esc(value ?? '—') + '</b></div>').join('');
+      ['阻挡', st.blockCnt], ['攻速', attackInterval(st), false, '攻击间隔（秒）'],
+      ['部署费', st.cost, true, /→/.test(String(st.cost ?? '')) ? '按阶位的部署费用：' + st.cost : '部署费用']
+    ].map(([label, value, wide, title]) => '<div class="stat' + (wide ? ' wide' : '') + '"' + (title ? ' title="' + attr(title) + '"' : '') + '><span>' + esc(label) + '</span><b>' + esc(value ?? '—') + '</b></div>').join('');
     const skills = (o.skills || []).map((s, i) => {
       const on = i === Number(o.skillIdx || 0);
       return '<div class="skill-card ' + (on ? 'on' : '') + '">' +
         (skillIconSrc(s) ? '<img src="' + skillIconSrc(s) + '" alt="" />' : '<span class="skill-icon-placeholder">技</span>') +
         '<div class="skill-main"><div class="skill-head"><b>' + skillNumeral(i) + ' · ' + esc(s.name) + '</b>' +
           '<span>SP ' + esc(s.spCost ?? '—') + ' / 初动 ' + esc(s.initSp ?? '—') + (s.duration ? ' / ' + esc(s.duration) + 's' : '') + '</span></div>' +
-          '<p>' + esc(s.desc || '') + '</p>' +
+          '<p>' + rich(s.desc || '') + '</p>' +
           (editMode ? '<button class="skill-set" type="button" data-set-skill="' + attr(o.id) + '" data-skill-index="' + i + '">' + (on ? '当前携带' : '设为携带') + '</button>' : '') +
         '</div>' +
       '</div>';
     }).join('');
-    const moduleHtml = o.module
-      ? '<div class="module-card">' + moduleBadge(o, true) + '<div><b>' + esc(o.module.name) + '</b><span>' + esc(o.module.type || '') + ' · 模组</span></div></div>'
-      : '<p class="detail-note">无模组 / 资料库未收录。</p>';
-    const prts = window.SP_PRTS?.modules?.[id] || null;
     const prtsLink = 'https://prts.wiki/w/' + encodeURIComponent(o.name || id);
-    const prtsHtml = prts
-      ? '<div class="prts-module"><p class="prts-effect">' + esc(prts.effect) + '</p>' +
-        (prts.unlock ? '<p class="detail-note">解锁：' + esc(prts.unlock) + '</p>' : '') +
-        '<p class="detail-note">来源：<a href="' + attr(prts.source || prtsLink) + '" target="_blank" rel="noreferrer">PRTS</a> · CC BY-NC-SA 4.0 · 已摘录整理</p>' +
-        '<p class="detail-note">基础游戏模组效果；卫戍协议内以游戏为准。</p></div>'
-      : '<p class="detail-note">暂无 PRTS 模组效果数据。 <a href="' + attr(prtsLink) + '" target="_blank" rel="noreferrer">查看 PRTS</a></p>';
+    const prtsEntry = window.SP_PRTS?.modules?.[id] || null;
+    const defaultMod = moduleOf(o);
+    const modIds = ((window.SP_OPERATOR_MODULES || {})[o.id] || (defaultMod ? [defaultMod.id] : []))
+      .filter((mid) => window.SP_MODULES?.[mid]);
+    const fallbackModId = (window.SP_MODULE_BY_OPERATOR || {})[o.id] || o.module?.id || modIds[0] || '';
+    let selectedModId = modIds.includes(detailModulePick[o.id]) ? detailModulePick[o.id] : fallbackModId;
+    if (!modIds.includes(selectedModId)) selectedModId = modIds[0] || '';
+    const modTypeText = (type) => String(type || '').split('-').pop() || '?';
+    const modCard = (entry) => '<div class="module-card"><span class="module-type big" title="' + attr('模组 ' + modTypeText(entry.type) + '：' + entry.name) + '">' + esc(modTypeText(entry.type)) + '</span><div class="module-card-main"><b>' + esc(entry.name) + '</b><span>' + esc(entry.type || '') + ' · 模组</span></div></div>';
+    const modLevel = (entry) => {
+      const lv = (entry.levels || []).slice().sort((a, b) => a.lv - b.lv).slice(-1)[0];
+      if (!lv) return prtsEntry?.effect ? '<p class="module-effect prts-effect">' + rich(prtsEntry.effect) + '</p>' : '<p class="detail-note">暂无等级效果数据。</p>';
+      const effectText = String(lv.effect || '').trim();
+      const tm = effectText.match(/^\[([^\]]+)\]\s*/);
+      const effectHtml = (tm ? '<span class="module-talent">[' + esc(tm[1]) + ']</span> ' : '') + rich(effectText.slice(tm ? tm[0].length : 0));
+      return '<div class="module-level"><span class="module-lv">L' + esc(lv.lv) + '</span><div class="module-level-main">' +
+        (lv.stats ? '<span class="module-stats">' + esc(lv.stats) + '</span>' : '') +
+        (effectText ? '<p class="module-effect">' + effectHtml + '</p>' : '') +
+      '</div></div>';
+    };
+    const modulePanels = modIds.map((mid) => {
+      const entry = window.SP_MODULES[mid];
+      return '<div class="module-panel" data-module-panel="' + attr(mid) + '"' + (mid === selectedModId ? '' : ' hidden') + '>' +
+        modCard(entry) + modLevel(entry) +
+        '<p class="detail-note">来源：<a href="' + attr(entry.source || 'https://closure.wiki/zh-cn/modules') + '" target="_blank" rel="noreferrer">可露希尔Wiki</a> · 基础游戏模组效果，卫戍协议内以游戏为准；模组数值可对照 <a href="' + attr(prtsLink) + '" target="_blank" rel="noreferrer">PRTS</a>。</p>' +
+      '</div>';
+    }).join('');
+    const modulePicker = modIds.length > 1
+      ? '<div class="module-picker">' + modIds.map((mid) => {
+          const entry = window.SP_MODULES[mid];
+          return '<button class="module-tab' + (mid === selectedModId ? ' on' : '') + '" type="button" data-module-pick="' + attr(mid) + '">' +
+            '<span class="module-type">' + esc(modTypeText(entry.type)) + '</span><b>' + esc(entry.name) + '</b></button>';
+        }).join('') + '</div>'
+      : '';
+    const moduleHtml = modIds.length
+      ? modulePicker + modulePanels
+      : '<p class="detail-note">该干员在当前资料库没有模组。 <a href="' + attr(prtsLink) + '" target="_blank" rel="noreferrer">查看 PRTS</a></p>';
     const traitHtml = (o.trait || o.eliteTrait)
       ? '<section class="detail-section"><h4>特质</h4>' +
-        '<div class="trait-card"><span class="trait-label">基础特质</span><p>' + esc(o.trait || '暂无数据') + '</p></div>' +
-        '<div class="trait-card elite"><span class="trait-label">精锐特质</span><p>' + esc(o.eliteTrait || '暂无数据') + '</p></div></section>'
+        '<div class="trait-card"><span class="trait-label">基础特质</span><p>' + linkedRich(o.trait || '暂无数据') + '</p></div>' +
+        '<div class="trait-card elite"><span class="trait-label">精锐特质</span><p>' + linkedRich(o.eliteTrait || '暂无数据') + '</p></div></section>'
       : '';
     const bondLines = (o.bonds || []).map((bid) => {
       const b = bond(bid); if (!b) return '';
-      const eff = (b.effects || []).map((e) => '<span class="bond-tier-line"><b>激活 ' + esc(e.need) + '</b> ' + esc(e.text) + '</span>').join('');
+      const eff = (b.effects || []).map((e) => '<span class="bond-tier-line"><b>激活 ' + esc(e.need) + '</b> ' + linkedRich(e.text) + '</span>').join('');
       return '<div class="detail-bond-row">' + bondMini(bid, !mobileUI) + eff + '</div>';
     }).join('');
-    const talents = (o.talents || []).map((t) => '<div class="talent"><b>' + esc(t.name) + '</b><p>' + esc(t.desc) + '</p></div>').join('');
+    const talents = (o.talents || []).map((t) => '<div class="talent"><b>' + esc(t.name) + '</b><p>' + linkedRich(t.desc) + '</p></div>').join('');
     const inCore = (state.coreOperators || []).some((c) => c.operatorId === o.id);
     const placed = (state.board?.placements || []).find((p) => p.operatorId === o.id);
     const rangeFacing = normalizeFacing(placed?.facing || 'up');
@@ -1392,16 +2017,19 @@
         '<span>放置到棋盘</span><i aria-hidden="true">→</i></button>' +
         '<span class="detail-note">点这里 → 收起详情和干员库 → 点棋盘空格放置。</span></div>'
       : '';
-    const body = '<div class="modal-body">' +
+    const tier = tierRoman(o);
+    const roleLine = o.subProfession || o.profession || '';
+    const body = '<div class="modal-body" data-detail-op="' + attr(o.id) + '">' +
       '<div class="detail-hero">' +
         '<img class="detail-avatar" src="' + avatarSrc(o.avatar) + '" alt="' + attr(o.name) + '" style="border-color:' + rarityColor(o) + '" />' +
-        '<div><div class="detail-kicker">OPERATOR / ' + esc(o.profession || '') + '</div>' +
+        '<div><div class="detail-kicker">OPERATOR</div>' +
           '<h2 class="detail-name">' + esc(o.name) + '</h2>' +
-          '<div class="detail-role" style="color:' + roleColor(o) + '">' + esc(o.profession || '') + ' · ' + esc(o.subProfession || '') + '</div>' +
-          '<div class="detail-meta"><span>' + esc(o.rarity || '') + '★</span><span>' + esc(o.profession || '') + '</span>' +
-            '<span>' + esc(String(o.attackKind).toLowerCase() === 'melee' ? '近战' : '远程') + '</span></div>' +
+          '<div class="detail-subline">' +
+            (tier ? '<span class="detail-tier" title="' + attr('阶位 ' + tier) + '">' + esc(tier) + '</span>' : '') +
+            (roleLine ? '<span class="detail-role" style="color:' + roleColor(o) + '">' + esc(roleLine) + '</span>' : '') +
+          '</div>' +
           '<div class="detail-bonds">' + bonds + '</div>' +
-          (editMode ? '<div class="detail-core"><button class="btn btn-small" type="button" data-core-op="' + attr(o.id) + '">' + (inCore ? '★ 移出右上角' : '☆ 加入右上角') + '</button><span class="detail-note">先放上棋盘再加入；右上角最多 6 人，不再自动收录。</span></div>' : '') +
+          (editMode ? '<div class="detail-core"><button class="btn btn-small" type="button" data-core-op="' + attr(o.id) + '" title="' + attr(inCore ? '移出右上角（最多 6 人）' : '加入右上角：先放上棋盘；最多 6 人') + '">' + (mobileUI ? (inCore ? '★ 右上角' : '☆ 右上角') : (inCore ? '★ 移出右上角' : '☆ 加入右上角')) + '</button>' + (mobileUI ? '' : '<span class="detail-note">先放上棋盘再加入；右上角最多 6 人，不再自动收录。</span>') + '</div>' : '') +
         '</div>' +
       '</div>' +
       mobilePlace +
@@ -1411,44 +2039,51 @@
         '<section class="detail-section"><h4>攻击范围</h4>' + rangeHtml(o.rangeGrid, rangeFacing, !!placed) + '</section>' +
         '<section class="detail-section"><h4>技能</h4><div class="skill-list">' + (skills || '<p class="detail-note">资料库未收录技能。</p>') + '</div></section>' +
         '<section class="detail-section"><h4>模组</h4>' + moduleHtml + '</section>' +
-        '<section class="detail-section"><h4>PRTS 模组效果</h4>' + prtsHtml + '</section>' +
         '<section class="detail-section"><h4>羁绊档位</h4>' + (bondLines || '<p class="detail-note">暂无羁绊数据。</p>') + '</section>' +
         (talents ? '<section class="detail-section"><h4>天赋</h4><div class="talent-list">' + talents + '</div></section>' : '') +
       '</div>' +
-      '<p class="detail-note">' + (mobileUI ? '数据来自本地资料库；羁绊效果见上方「羁绊档位」。' : '拖动 / 数据来自本地资料库；羁绊可点击查看效果。') + '</p>' +
+      '<p class="detail-note">' + (mobileUI ? '数据来自本地资料库；羁绊效果见上方「羁绊档位」。' : '数据来自本地资料库；右侧抽屉可滚动查看全部。') + '</p>' +
     '</div>';
-    openModal(body);
+    if (mobileUI) openModal(body);
+    else openDetailDrawer(body);
   }
 
-  function openBond(id) {
+  function bondInfoHtml(id) {
     const b = bond(id);
-    if (!b) return;
-    const effects = (b.effects || []).map((e) =>
-      '<div class="detail-section"><h4>激活 ' + esc(e.need) + '</h4><p>' + esc(e.text) + '</p></div>').join('');
+    if (!b) return '';
     const active = computeBondCounts(state)[id] || { count: 0 };
-    const thresholds = (b.thresholds || []).slice().sort((a, b) => a - b);
-    const tierText = active.reachedTier > 0 ? ' · 当前档位 ' + esc(active.tierThreshold) : ' · 未达档位';
-    const playBlock = (editMode || b.play)
-      ? '<section class="detail-section bond-play-section"><h4>本套怎么用</h4>' +
-        '<p class="bond-play-text" ' + (editMode ? 'contenteditable="true" data-bond-play="' + attr(id) + '"' : '') + '>' +
-        (b.play ? esc(b.play) : (editMode ? '' : '暂无')) + '</p></section>'
+    const thresholds = (b.thresholds || []).slice().sort((a, b2) => a - b2);
+    const tierText = active.reachedTier > 0 ? '当前档位 ' + esc(active.tierThreshold) : '未达档位';
+    const rosterCount = bondOperators(id).length;
+    const effects = b.effects || [];
+    const summaryText = String(b.summary || '').trim();
+    const tiers = effects.map((e) =>
+      '<div class="info-pop-tier"><b>激活 ' + esc(e.need) + '</b><span>' + linkedRich(e.text) + '</span></div>').join('');
+    // 很多单档盟约的 summary 和 effects[0].text 是同一句，别在浮层里显示两遍。
+    const summaryDup = effects.some((e) => String(e.text || '').trim() === summaryText);
+    const summaryHtml = summaryText && !summaryDup ? '<p class="info-pop-text">' + linkedRich(b.summary) + '</p>' : '';
+    const playHtml = (b.play || editMode)
+      ? '<div class="info-pop-play"><b>本套怎么用</b>' +
+        (editMode
+          ? '<span class="bond-play-text" contenteditable="true" data-bond-play="' + attr(id) + '">' + esc(b.play || '') + '</span>'
+          : '<span>' + linkedRich(b.play || '暂无') + '</span>') +
+        '</div>'
       : '';
-    const body = '<div class="modal-body">' +
-      '<div class="detail-hero">' +
-        '<img class="detail-avatar" src="' + bondIcon(id) + '" alt="" style="object-fit:contain;padding:16px;border-color:var(--line)" />' +
-        '<div><div class="detail-kicker">BOND / ' + esc(b.tag || '') + '</div><h2 class="detail-name">' + esc(b.name) + '</h2>' +
-          '<div class="detail-role">当前 ' + esc(active.count) + ' 人' + tierText + ' · 阈值 ' + thresholds.join(' / ') + '</div>' +
-          '<p class="detail-note">' + esc(b.summary) + '</p>' +
-        '</div>' +
+    return '<div class="info-pop-head">' +
+        '<img src="' + bondIcon(id) + '" alt="" draggable="false" />' +
+        '<div><div class="detail-kicker">BOND / ' + esc(b.tag || '') + '</div><h3>' + esc(b.name) + '</h3>' +
+        '<div class="info-pop-meta">棋盘 ' + esc(active.count) + ' 人 · 名册 ' + rosterCount + ' 人 · ' + tierText + ' · 阈值 ' + thresholds.join(' / ') + '</div></div>' +
       '</div>' +
-      '<div class="detail-sections">' + effects + playBlock + '</div>' +
-    '</div>';
-    openModal(body);
-    const play = $('[data-bond-play]');
-    if (play) {
-      play.addEventListener('input', () => { b.play = play.innerText; saveSoon(); });
-      play.addEventListener('blur', saveNow);
-    }
+      summaryHtml +
+      tiers +
+      bondOpsSectionHtml(id) +
+      playHtml;
+  }
+
+  function openBond(id, anchor) {
+    if (!bond(id)) return;
+    // 读态 / 编辑态都用同一个词条浮层：编辑态的「本套怎么用」直接在浮层里改。
+    openBondTerm(id, anchor || null);
   }
 
   /* ------------------------------------------------------------
@@ -1480,7 +2115,7 @@
           field('名称', 'name', o.name) +
           field('头像 key / 路径', 'avatar', o.avatar, { hint: '内置：' + avatarKeys.slice(0, 8).join(' / ') }) +
           field('稀有度', 'rarity', o.rarity, { type: 'number', min: 1, max: 6 }) +
-          field('阶', 'tier', o.tier, { type: 'number', min: 1, max: 6 }) +
+          field('阶', 'tier', tierNumber(o) || o.tier, { type: 'number', min: 1, max: 6 }) +
           field('职业', 'profession', o.profession) +
           field('定位（画布内 2-4 字）', 'role', o.role) +
           '<div class="field"><label>定位色</label><select name="roleKey">' + roleOptions + '</select></div>' +
@@ -1791,7 +2426,7 @@
     state.coreOperators = list;
     saveNow();
     renderPoster();
-    if (refreshModal && $('.modal')) openDetail(id);
+    if (refreshModal && ($('.modal') || $('#detailDrawer')?.classList.contains('open'))) openDetail(id);
   }
 
   function boardSnapshot() {
@@ -1895,6 +2530,7 @@
      ------------------------------------------------------------ */
   function openRoster() {
     if (!editMode) return;
+    closeDetailDrawer();
     const drawer = $('#rosterDrawer');
     if (!drawer) return;
     if (window.innerWidth <= 1100 && !$('#equipmentDrawer')?.hidden) closeEquipmentLibrary();
@@ -1949,23 +2585,21 @@
     const box = $('#rosterFilters');
     if (!box) return;
     const ops = Object.values(state.operators || {});
-    const profs = [...new Set(ops.map((o) => o.profession).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'zh'));
-    const rarities = [...new Set(ops.map((o) => Number(o.rarity)).filter((n) => Number.isFinite(n) && n >= 1 && n <= 6))].sort((a, b) => b - a);
     const bonds = currentBondEntries();
+    const coreBonds = bonds.filter(([id]) => isCoreBond(id));
+    const extraBonds = bonds.filter(([id]) => !isCoreBond(id));
     const triggerCounts = TRIGGER_DEFS.map((t) => ({ ...t, count: ops.filter((o) => t.re.test(operatorTraitText(o))).length })).filter((t) => t.count > 0);
+    const kinds = TRAIT_KINDS.filter((k) => ops.some((o) => traitKinds(o).includes(k)));
     const active = [];
-    for (const p of rosterFilter.prof) active.push({ group: 'prof', value: p, label: p });
-    for (const r of rosterFilter.rarity) active.push({ group: 'rarity', value: r, label: r + ' 星' });
     for (const t of rosterFilter.trigger) { const def = TRIGGER_DEFS.find((x) => x.id === t); if (def) active.push({ group: 'trigger', value: t, label: def.label }); }
-    if (rosterFilter.bond !== 'all') active.push({ group: 'bond', value: rosterFilter.bond, label: state.bondLibrary?.[rosterFilter.bond]?.name || rosterFilter.bond });
+    for (const k of rosterFilter.kind) active.push({ group: 'kind', value: k, label: k });
+    for (const id of rosterFilter.bond) active.push({ group: 'bond', value: id, label: state.bondLibrary?.[id]?.name || id });
     box.innerHTML =
       '<input class="roster-search" id="rosterSearch" placeholder="搜索干员 / 拼音" value="' + attr(rosterFilter.q) + '" />' +
-      rosterFilterGroup('职业', rosterFilterChip('prof', 'all', '全部', rosterFilter.prof.size === 0) + profs.map((p) => rosterFilterChip('prof', p, p, rosterFilter.prof.has(p))).join('')) +
-      rosterFilterGroup('星级', rosterFilterChip('rarity', 'all', '全部', rosterFilter.rarity.size === 0) + rarities.map((n) => rosterFilterChip('rarity', String(n), n + ' 星', rosterFilter.rarity.has(String(n)))).join('')) +
+      rosterFilterGroup('特质', rosterFilterChip('kind', 'all', '全部', rosterFilter.kind.size === 0) + kinds.map((k) => rosterFilterChip('kind', k, k, rosterFilter.kind.has(k))).join('')) +
       rosterFilterGroup('触发', rosterFilterChip('trigger', 'all', '全部', rosterFilter.trigger.size === 0) + triggerCounts.map((t) => rosterFilterChip('trigger', t.id, t.label, rosterFilter.trigger.has(t.id))).join('')) +
-      '<div class="roster-filter-row">' +
-        '<select id="rosterBond" title="按盟约筛选"><option value="all">全部盟约</option>' + bonds.map(([id, b]) => '<option value="' + attr(id) + '"' + (rosterFilter.bond === id ? ' selected' : '') + '>' + esc(b.name) + '</option>').join('') + '</select>' +
-      '</div>' +
+      rosterFilterGroup('核心盟约', coreBonds.map(([id, b]) => rosterFilterChip('bond', id, b.name, rosterFilter.bond.has(id))).join('')) +
+      rosterFilterGroup('附加盟约', extraBonds.map(([id, b]) => rosterFilterChip('bond', id, b.name, rosterFilter.bond.has(id))).join('')) +
       '<div class="rf-active"><div class="rf-active-chips">' +
         (active.length ? active.map((a) => '<button class="rf-active-chip" type="button" data-rf-remove="' + a.group + '" data-rf-value="' + attr(a.value) + '">' + esc(a.label) + ' <b>×</b></button>').join('') : '<span class="rf-active-empty">未筛选</span>') +
       '</div><button class="rf-clear" type="button" data-rf-clear>清除全部</button></div>' +
@@ -1973,38 +2607,66 @@
   }
   function desktopFilterChoices() {
     const ops = Object.values(state.operators || {});
-    const profs = [...new Set(ops.map((o) => o.profession).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'zh'));
-    const rarities = [...new Set(ops.map((o) => Number(o.rarity)).filter((n) => Number.isFinite(n) && n >= 1 && n <= 6))].sort((a, b) => b - a);
     const triggers = TRIGGER_DEFS.filter((t) => ops.some((o) => t.re.test(operatorTraitText(o))));
+    const kinds = TRAIT_KINDS.filter((k) => ops.some((o) => traitKinds(o).includes(k)));
     const bonds = currentBondEntries();
-    return { ops, profs, rarities, triggers, bonds };
+    return { ops, triggers, kinds, bonds };
   }
 
   function desktopSelectedOptions(choices) {
     const selected = [];
     let index = 0;
     const add = (label, test) => selected.push({ index: index++, label, test });
-    for (const p of choices.profs) if (rosterFilter.prof.has(p)) add(p, (o) => o.profession === p);
-    for (const n of choices.rarities) {
-      const value = String(n);
-      if (rosterFilter.rarity.has(value)) add(n + ' 星', (o) => String(o.rarity) === value);
-    }
     for (const t of choices.triggers) if (rosterFilter.trigger.has(t.id)) add(t.label, (o) => operatorTriggers(o).includes(t.id));
-    if (rosterFilter.bond !== 'all') {
-      const bid = rosterFilter.bond;
-      add(state.bondLibrary?.[bid]?.name || bid, (o) => (o.bonds || []).includes(bid));
-    }
+    for (const k of choices.kinds) if (rosterFilter.kind.has(k)) add(k, (o) => traitKinds(o).includes(k));
+    for (const id of rosterFilter.bond) add(state.bondLibrary?.[id]?.name || id, (o) => (o.bonds || []).includes(id));
     return selected;
   }
 
+  /* 干员栏只保留头像 + 名字，下面直接摊开盟约与基础特质：
+     这是玩家看卡时最先要判断的信息，不再藏进详情弹层。 */
+  const TRAIT_KIND_CLASS = {
+    '持续叠加': 'kind-stack',
+    '单次叠加': 'kind-once',
+    '作战能力': 'kind-battle',
+    '整备能力': 'kind-prep',
+    '特异化': 'kind-special'
+  };
+  function rosterBondHtml(id) {
+    const b = bond(id);
+    if (!b) return '';
+    const core = isCoreBond(id);
+    const effectText = (b.effects || []).map((e) => e.need + '：' + e.text).join('\n') || b.summary || '';
+    return '<span class="roster-bond' + (core ? ' core' : ' extra') + '" title="' + attr((core ? '核心盟约' : '附加盟约') + '：' + b.name + (effectText ? '\n' + effectText : '')) + '">' +
+      '<img src="' + attr(bondIcon(id)) + '" alt="" draggable="false" />' +
+      '<em>' + (core ? '核心' : '附加') + '</em>' +
+      '<span class="roster-bond-name">' + esc(b.name) + '</span>' +
+    '</span>';
+  }
+  function rosterBondList(o) {
+    const bonds = (o.bonds || []).filter((id) => bond(id));
+    return bonds.filter((id) => isCoreBond(id)).concat(bonds.filter((id) => !isCoreBond(id)));
+  }
+  function rosterTraitHtml(o) {
+    const raw = String(o?.trait || '').trim();
+    if (!raw) return '<span class="roster-trait empty">资料库未收录基础特质</span>';
+    const kind = TRAIT_KINDS.find((k) => raw.startsWith(k)) || '';
+    const body = kind ? raw.slice(kind.length).trim() : raw;
+    return '<span class="roster-trait" title="' + attr('基础特质：' + raw) + '">' +
+      (kind ? '<span class="roster-trait-kind ' + (TRAIT_KIND_CLASS[kind] || '') + '">' + esc(kind) + '</span>' : '') +
+      rich(body) +
+    '</span>';
+  }
   function rosterItemHtml(o) {
-    const sk = skillOf(o);
-    return '<div class="roster-item' + (selectedRosterId === o.id ? ' selected' : '') + '" draggable="true" data-roster-id="' + attr(o.id) + '" data-name="' + attr(o.name) + '" data-prof="' + attr(o.profession || '') + '" data-rarity="' + attr(String(o.rarity ?? '')) + '" data-triggers="' + attr(operatorTriggers(o).join(',')) + '" data-tier="' + esc(o.tier) + '" data-bonds="' + attr((o.bonds || []).join(',')) + '" title="拖到棋盘放置；双击查看详情" style="--rarity:' + rarityColor(o) + '">' +
+    const ordered = rosterBondList(o);
+    return '<div class="roster-item' + (selectedRosterId === o.id ? ' selected' : '') + '" draggable="true" data-roster-id="' + attr(o.id) + '" data-name="' + attr(o.name) + '" data-prof="' + attr(o.profession || '') + '" data-rarity="' + attr(String(o.rarity ?? '')) + '" data-triggers="' + attr(operatorTriggers(o).join(',')) + '" data-tier="' + esc(o.tier) + '" data-bonds="' + attr((o.bonds || []).join(',')) + '" title="拖到棋盘放置；双击查看完整详情" style="--rarity:' + rarityColor(o) + '">' +
       '<img class="roster-avatar" src="' + avatarSrc(o.avatar) + '" alt="' + attr(o.name) + '" draggable="false" />' +
-      '<div><div class="roster-name">' + esc(o.name) + '</div>' +
-        '<div class="roster-sub">' + esc(o.profession || '') + '</div>' +
-        '<div class="roster-loadout"><span class="loadout-item" title="' + attr(sk ? '技能 ' + skillNumeral(o.skillIdx) + '：' + sk.name : '未配置技能') + '"><img src="' + skillIcon(o) + '" alt="" draggable="false" /><b>' + skillNumeral(o.skillIdx) + '</b></span>' + moduleBadge(o) + '</div></div>' +
-      '<button class="roster-info" type="button" data-roster-detail="' + attr(o.id) + '" title="查看详情">i</button>' +
+      '<div class="roster-main">' +
+        '<div class="roster-head"><span class="roster-name">' + esc(o.name) + '</span>' +
+          ordered.map(rosterBondHtml).join('') +
+        '</div>' +
+        rosterTraitHtml(o) +
+      '</div>' +
     '</div>';
   }
 
@@ -2027,7 +2689,9 @@
     }
     const total = groups.reduce((n, g) => n + g.ops.length, 0);
     const count = $('#rosterCount');
-    if (count) count.textContent = '命中 ' + total + ' 位干员 · 全库 ' + choices.ops.length + ' 位';
+    if (count) count.textContent = selected.length
+      ? '筛选结果 ' + total + ' 位干员 · 全库 ' + choices.ops.length + ' 位'
+      : '全部 ' + total + ' 位干员 · 全库 ' + choices.ops.length + ' 位';
   }
 
   function filterRoster() {
@@ -2045,6 +2709,7 @@
      ------------------------------------------------------------ */
   function openVariants() {
     if (!editMode) return;
+    closeDetailDrawer();
     const drawer = $('#variantDrawer');
     if (!drawer) return;
     if (!$('#equipmentDrawer')?.hidden) closeEquipmentLibrary();
@@ -2067,7 +2732,7 @@
     if (!box) return;
     const placed = new Set((state.board?.placements || []).map((p) => p.operatorId));
     const unplaced = Object.values(state.operators || {}).filter((o) => !placed.has(o.id))
-      .sort((a, b) => (Number(b.bench) - Number(a.bench)) || (Number(a.tier) - Number(b.tier)) || a.name.localeCompare(b.name, 'zh'));
+      .sort((a, b) => (Number(b.bench) - Number(a.bench)) || (tierNumber(a) - tierNumber(b)) || a.name.localeCompare(b.name, 'zh'));
     const unplacedHtml = unplaced.length ? unplaced.map((o) => '<div class="variant-op' + (selectedRosterId === o.id ? ' selected' : '') + '" draggable="true" data-roster-id="' + attr(o.id) + '" title="' + attr(o.name) + '"><img src="' + avatarSrc(o.avatar) + '" alt="" draggable="false" style="--rarity:' + rarityColor(o) + '" /><span>' + esc(o.name) + '</span></div>').join('') : '<div class="variant-empty">所有干员都已上场</div>';
     box.innerHTML =
       '<div class="variant-section"><div class="variant-title"><span>未上场干员</span><span class="count">' + unplaced.length + '</span></div><div class="variant-list">' + unplacedHtml + '</div></div>';
@@ -2087,6 +2752,7 @@
   }
   function openEquipmentLibrary() {
     if (!editMode) return;
+    closeDetailDrawer();
     const drawer = $('#equipmentDrawer');
     if (!drawer) return;
     if (window.innerWidth <= 1100 && !$('#rosterDrawer')?.hidden) closeRoster();
@@ -2383,10 +3049,12 @@
       const raw = JSON.parse(await file.text());
       const next = migrateToV3(raw);
       if (!isValid(next)) throw new Error('缺少 meta / coreOperators / board / stages');
-      backup(STORAGE_KEY + '-before-import', state);
+      backup(STORAGE_KEY + '-before-import', toStorageState(state));
       state = hydrateState(next);
       saveNow();
       renderPoster();
+      renderRoster();     // 干员库 / 备选抽屉里的「已上场」标记也要跟着新数据走
+      renderVariants();
       toast('数据已导入（旧结构会自动迁移）');
     } catch (e) {
       console.error(e);
@@ -2396,10 +3064,12 @@
 
   function resetData() {
     if (!confirm('恢复示例内容？本机保存的编辑会先备份。')) return;
-    backup(STORAGE_KEY + '-before-reset', state);
+    backup(STORAGE_KEY + '-before-reset', toStorageState(state));
     state = hydrateState(DEFAULT_DATA);
     saveNow();
     renderPoster();
+    renderRoster();
+    renderVariants();
     toast('已恢复示例；旧数据已备份');
   }
 
@@ -2694,6 +3364,7 @@
       '<p class="detail-note">发现以下问题，是否仍然导出？</p><ul class="export-issues">' + items + '</ul>' +
       '<div class="form-actions"><button class="btn" type="button" data-export-back>返回编辑</button><button class="btn btn-primary" type="button" data-export-force>仍然导出</button></div></div>');
   }
+  let lastExport = '';
   async function exportPoster(force = false) {
     const btn = $('#exportBtn');
     const span = btn?.querySelector('span');
@@ -2721,7 +3392,8 @@
         pixelRatio: 2,
         backgroundColor: '#0b0706'
       });
-      openPoster(dataUrl);
+      lastExport = dataUrl;
+      downloadPoster(dataUrl);
     } catch (e) {
       console.error(e);
       toast('导出失败：' + e.message, true);
@@ -2737,6 +3409,23 @@
     }
   }
 
+  function downloadDataUrl(dataUrl, name) {
+    const a = document.createElement('a');
+    a.href = dataUrl;
+    a.download = name;
+    a.rel = 'noopener';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  }
+
+  function downloadPoster(dataUrl) {
+    const name = '卫戍协议-规程-谢拉格冻结叠层-' + (state.meta.date || '2026-11-09') + '.png';
+    downloadDataUrl(dataUrl, name);
+    toast('已导出 3200 × 2400 PNG' + (state.meta.showQr && !siteUrl() ? '（没设入口链接，这张不带二维码）' : ''));
+  }
+
+  // 预览保留成可选动作（调试台 / 以后加「查看大图」按钮时用），导出流程不再自动弹它。
   function openPoster(dataUrl) {
     const name = '卫戍协议-规程-谢拉格冻结叠层-' + (state.meta.date || '2026-11-09') + '.png';
     openModal('<div class="poster-wrap" style="padding:12px"><img src="' + dataUrl + '" alt="卫戍协议规程一图流" style="width:100%;height:auto;border:1px solid var(--line)" /></div>' +
@@ -2751,7 +3440,12 @@
   /* ------------------------------------------------------------
      Share: compact state link, QR, portrait card, read mode
      ------------------------------------------------------------ */
-  function storageBase() { return toStorageState(hydrateState(DEFAULT_DATA)); }
+  // 默认数据的精简形态在一次会话里不会变，算一次缓存起来；每次交出去的是副本，调用方随便改。
+  let storageBaseCache = null;
+  function storageBase() {
+    if (!storageBaseCache) storageBaseCache = toStorageState(hydrateState(DEFAULT_DATA));
+    return clone(storageBaseCache);
+  }
 
   function diffPayload(cur, base) {
     if (Array.isArray(cur) || Array.isArray(base)) {
@@ -2821,7 +3515,7 @@
     try {
       const next = migrateToV3(deepMerge(storageBase(), payload));
       if (!isValid(next)) throw new Error('缺少必要字段');
-      backup(STORAGE_KEY + '-before-share', state);
+      backup(STORAGE_KEY + '-before-share', toStorageState(state));
       state = hydrateState(next);
       saveNow();
       renderPoster();
@@ -2945,7 +3639,7 @@
     const ops = lineup.map((o) => '<div class="sc-op" style="--rarity:' + rarityColor(o) + '">' +
       '<img src="' + avatarSrc(o.avatar) + '" alt="" draggable="false" />' +
       '<b>' + esc(o.name) + '</b>' +
-      '<span>' + skillNumeral(o.skillIdx) + (o.module ? ' · ' + esc(moduleType(o)) : '') + '</span>' +
+      '<span>' + skillNumeral(o.skillIdx) + (moduleOf(o) ? ' · ' + esc(moduleType(o)) : '') + '</span>' +
     '</div>').join('');
     const stages = (state.stages || []).map((s) => {
       const ids = stageIds(s).map((id) => op(id)).filter(Boolean);
@@ -2988,22 +3682,14 @@
       if (document.fonts?.ready) await document.fonts.ready;
       await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
       const dataUrl = await window.htmlToImage.toPng(card, { width: 1080, height: 2160, pixelRatio: 2, backgroundColor: '#0b0706' });
-      openPortrait(dataUrl);
+      downloadDataUrl(dataUrl, '卫戍协议-竖版-' + (state.meta.date || '2026-11-09') + '.png');
+      toast('已导出竖版长图 2160 × 4320');
     } catch (e) {
       console.error(e);
       toast('竖版长图导出失败：' + e.message, true);
     } finally {
       card.remove();
     }
-  }
-
-  function openPortrait(dataUrl) {
-    const name = '卫戍协议-竖版-' + (state.meta.date || '2026-11-09') + '.png';
-    openModal('<div class="poster-wrap" style="padding:12px;display:grid;place-items:center"><img src="' + dataUrl + '" alt="卫戍协议竖版长图" style="max-height:68vh;width:auto;max-width:100%;border:1px solid var(--line)" /></div>' +
-      '<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:0 12px 12px">' +
-        '<span class="detail-note">1080 × 2160（导出 2160 × 4320）· 适合手机 / 小红书 / 群聊</span>' +
-        '<a class="btn btn-primary" href="' + dataUrl + '" download="' + name + '">下载长图</a>' +
-      '</div>', true);
   }
 
   function openHelp() {
@@ -3015,7 +3701,7 @@
       '<h2 class="detail-name" style="font-size:30px">三步做出你的一图流</h2>' +
       '<ol class="help-steps">' +
         '<li><b>抄</b><span>当前是谢拉格 8 人示例。点任意头像看数值 / 技能 / 模组；点棋盘上的棋子看详情，里面有「替补 / 没有怎么办」的缺卡替代。</span></li>' +
-        '<li><b>改</b><span>点右上角「编辑」：直接改字、拖棋子摆站位、点装备 / 盟约替换。改动自动存在本机，新建或导入前会先写自动备份。</span></li>' +
+        '<li><b>改</b><span>点右上角「编辑」：直接改字、拖棋子摆站位、点装备 / 盟约替换。改动自动存在本机，改错了按 Ctrl+Z（或编辑栏的撤销箭头）退回去；新建或导入前会先写自动备份。</span></li>' +
         '<li><b>发</b><span>「导出一图流」出 3200×2400 PNG；「分享」出阵容链接、二维码和竖版长图。别人打开链接看到的就是你这一版。</span></li>' +
       '</ol>' +
       '<p class="help-note">手机上看不清？点右下角「放大」（或双击海报），海报会按原始尺寸展开，拖动查看；再点一次退出。</p>' +
@@ -3089,6 +3775,8 @@
   function enterMobileUI() {
     if (mobileUI) return;
     if (zoomMode) setZoomMode(false);
+    closeInfoPop();
+    closeDetailDrawer();
     mobileUI = true;
     document.body.classList.add('mobile-ui');
     const poster = $('#poster');
@@ -3102,6 +3790,8 @@
   function exitMobileUI() {
     if (!mobileUI) return;
     if (editMode) setMobileEdit(false);
+    closeInfoPop();
+    closeDetailDrawer();
     mobileUI = false;
     document.body.classList.remove('mobile-ui');
     fitPoster();
@@ -3237,12 +3927,11 @@
   }
 
   function resetMobileFilter() {
-    mobileFilter = { prof: new Set(), rarity: new Set(), trigger: new Set(), bond: new Set() };
+    mobileFilter = { trigger: new Set(), kind: new Set(), bond: new Set() };
   }
 
   function mobileFilterCount() {
-    return mobileFilter.prof.size + mobileFilter.rarity.size + mobileFilter.trigger.size +
-      mobileFilter.bond.size;
+    return mobileFilter.trigger.size + mobileFilter.kind.size + mobileFilter.bond.size;
   }
 
   function updateMobileFilterLabel() {
@@ -3255,34 +3944,37 @@
 
   function mobileFilterChoices() {
     const ops = Object.values(state.operators || {});
-    const profs = [...new Set(ops.map((o) => o.profession).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'zh'));
-    const rarities = [...new Set(ops.map((o) => Number(o.rarity)).filter((n) => Number.isFinite(n) && n >= 1 && n <= 6))].sort((a, b) => b - a);
     const triggers = TRIGGER_DEFS.filter((t) => ops.some((o) => t.re.test(operatorTraitText(o))));
+    const kinds = TRAIT_KINDS.filter((k) => ops.some((o) => traitKinds(o).includes(k)));
     const bondEntries = currentBondEntries();
-    return { ops, profs, rarities, triggers, bondEntries };
+    return { ops, triggers, kinds, bondEntries };
   }
 
   function mobileSelectedOptions(choices) {
     const selected = [];
     let index = 0;
     const add = (label, test) => selected.push({ index: index++, label, test });
-    for (const p of choices.profs) if (mobileFilter.prof.has(p)) add(p, (o) => o.profession === p);
-    for (const n of choices.rarities) {
-      const value = String(n);
-      if (mobileFilter.rarity.has(value)) add(n + ' 星', (o) => String(o.rarity) === value);
-    }
     for (const t of choices.triggers) if (mobileFilter.trigger.has(t.id)) add(t.label, (o) => operatorTriggers(o).includes(t.id));
+    for (const k of choices.kinds) if (mobileFilter.kind.has(k)) add(k, (o) => traitKinds(o).includes(k));
     for (const [id, b] of choices.bondEntries) if (mobileFilter.bond.has(id)) add(b.name, (o) => (o.bonds || []).includes(id));
     return selected;
   }
 
   function mobileRosterItemHtml(o, placed) {
+    const ordered = rosterBondList(o);
     return '<button class="mr-sheet-op' + (selectedRosterId === o.id ? ' on' : '') + (placed.has(o.id) ? ' placed' : '') +
       '" type="button" data-mr-op-id="' + attr(o.id) + '" data-name="' + attr(o.name) + '" data-prof="' + attr(o.profession || '') +
       '" data-rarity="' + attr(String(o.rarity ?? '')) + '" data-triggers="' + attr(operatorTriggers(o).join(',')) +
-      '" data-bonds="' + attr((o.bonds || []).join(',')) + '" style="--rarity:' + rarityColor(o) + '" title="' + attr(o.name + (placed.has(o.id) ? '（已在场上）' : '')) + '">' +
+      '" data-bonds="' + attr((o.bonds || []).join(',')) + '" style="--rarity:' + rarityColor(o) + '" title="' + attr(o.name + (placed.has(o.id) ? '（已在场上）' : '') + '；点开看详情 / 放置') + '">' +
       '<img src="' + avatarSrc(o.avatar) + '" alt="" draggable="false" />' +
-      '<span>' + esc(o.name) + '</span>' +
+      '<span class="mr-op-body">' +
+        '<span class="mr-op-head">' +
+          '<span class="mr-op-name">' + esc(o.name) + '</span>' +
+          (placed.has(o.id) ? '<span class="mr-op-placed">场上</span>' : '') +
+          ordered.map(rosterBondHtml).join('') +
+        '</span>' +
+        rosterTraitHtml(o) +
+      '</span>' +
     '</button>';
   }
 
@@ -3307,13 +3999,12 @@
     const total = groups.reduce((n, g) => n + g.ops.length, 0);
     const active = !!q || selected.length > 0;
     const count = $('#mrSheetCount');
-    if (count) count.textContent = active ? '命中 ' + total + ' 位干员' : '全部 ' + total + ' 位干员';
+    if (count) count.textContent = active ? '筛选结果 ' + total + ' 位干员' : '全部 ' + total + ' 位干员';
     const summary = $('#mrFilterSummary');
     if (summary) {
       const parts = [];
-      if (mobileFilter.prof.size) parts.push('职业 ' + choices.profs.filter((p) => mobileFilter.prof.has(p)).join('/'));
-      if (mobileFilter.rarity.size) parts.push('星级 ' + choices.rarities.filter((n) => mobileFilter.rarity.has(String(n))).map((n) => n + ' 星').join('/'));
       if (mobileFilter.trigger.size) parts.push('触发 ' + choices.triggers.filter((t) => mobileFilter.trigger.has(t.id)).map((t) => t.label).join('/'));
+      if (mobileFilter.kind.size) parts.push('特质 ' + choices.kinds.filter((k) => mobileFilter.kind.has(k)).join('/'));
       if (mobileFilter.bond.size) parts.push('盟约 ' + choices.bondEntries.filter(([id]) => mobileFilter.bond.has(id)).map(([, b]) => b.name).join('/'));
       summary.textContent = parts.length ? '已选：' + parts.join(' · ') : '';
       summary.hidden = !parts.length;
@@ -3326,27 +4017,29 @@
   }
 
   function mobileRosterSheetHtml() {
-    const { ops, profs, rarities, triggers, bondEntries } = mobileFilterChoices();
+    const { ops, triggers, kinds, bondEntries } = mobileFilterChoices();
     const chip = (group, value, label, on) =>
       '<button class="mr-fchip' + (on ? ' on' : '') + '" type="button" data-mrf-group="' + group + '" data-mrf-value="' + attr(value) + '">' + esc(label) + '</button>';
-    const groupHtml = (label, group, items, allOn, itemOn) =>
+    const groupHtml = (label, group, items, allOn, itemOn, withAll = true) =>
       '<div class="mr-filter-group"><span class="mr-filter-label">' + label + '</span><div class="mr-filter-chips">' +
-        chip(group, 'all', '全部', allOn) +
+        (withAll ? chip(group, 'all', '全部', allOn) : '') +
         items.map(([value, text]) => chip(group, value, text, itemOn(value))).join('') +
       '</div></div>';
+    const coreBonds = bondEntries.filter(([id]) => isCoreBond(id));
+    const extraBonds = bondEntries.filter(([id]) => !isCoreBond(id));
     const filterCount = mobileFilterCount();
     const filters = mobileFilterOpen
       ? '<div class="mr-filters">' +
-          groupHtml('职业', 'prof', profs.map((p) => [p, p]), mobileFilter.prof.size === 0, (v) => mobileFilter.prof.has(v)) +
-          groupHtml('星级', 'rarity', rarities.map((n) => [String(n), n + ' 星']), mobileFilter.rarity.size === 0, (v) => mobileFilter.rarity.has(v)) +
+          groupHtml('特质', 'kind', kinds.map((k) => [k, k]), mobileFilter.kind.size === 0, (v) => mobileFilter.kind.has(v)) +
           groupHtml('触发', 'trigger', triggers.map((t) => [t.id, t.label]), mobileFilter.trigger.size === 0, (v) => mobileFilter.trigger.has(v)) +
-          groupHtml('盟约', 'bond', bondEntries.map(([id, b]) => [id, b.name]), mobileFilter.bond.size === 0, (v) => mobileFilter.bond.has(v)) +
+          groupHtml('核心盟约', 'bond', coreBonds.map(([id, b]) => [id, b.name]), mobileFilter.bond.size === 0, (v) => mobileFilter.bond.has(v), false) +
+          groupHtml('附加盟约', 'bond', extraBonds.map(([id, b]) => [id, b.name]), mobileFilter.bond.size === 0, (v) => mobileFilter.bond.has(v), false) +
           '<button class="mr-filter-reset" type="button" data-mrf-reset>重置筛选</button>' +
         '</div>'
       : '';
     return '<div class="mr-sheet-backdrop" data-mr-sheet-close></div>' +
       '<section class="mr-sheet' + (mobileFilterOpen ? ' with-filters' : '') + '" aria-label="手机干员库">' +
-        '<div class="mr-sheet-head"><b>干员库</b><span>点干员看详情；再点「放置到棋盘」</span>' +
+        '<div class="mr-sheet-head"><b>干员库</b><span>行内看盟约与特质；点开看详情 / 放置</span>' +
           '<button class="mr-sheet-close" type="button" data-mr-sheet-close aria-label="关闭干员库">×</button></div>' +
         '<div class="mr-sheet-search-row">' +
           '<input class="mr-sheet-search" id="mrRosterSearch" type="search" autocomplete="off" placeholder="搜索干员 / 拼音" value="' + attr(mobileRosterQuery) + '" />' +
@@ -3362,26 +4055,20 @@
   function mobileBondDetailHtml(id, b) {
     if (!b) return '';
     const effects = (b.effects || []).map((e) =>
-      '<div class="mr-bond-effect"><b>激活 ' + esc(e.need) + '</b><span>' + esc(e.text) + '</span></div>').join('');
-    const seen = new Set();
-    const ops = [];
-    for (const p of [...(state.board?.placements || [])].sort((a, b2) => (a.row - b2.row) || (a.col - b2.col))) {
-      if (!p || seen.has(p.operatorId)) continue;
-      seen.add(p.operatorId);
-      const o = op(p.operatorId);
-      if (o && (o.bonds || []).includes(id)) ops.push(o);
-    }
+      '<div class="mr-bond-effect"><b>激活 ' + esc(e.need) + '</b><span>' + linkedRich(e.text) + '</span></div>').join('');
+    const ops = bondOperators(id);
+    const onBoard = new Set((state.board?.placements || []).map((p) => p.operatorId));
     const avatars = ops.map((o) =>
-      '<button class="mr-bond-op" type="button" data-op-id="' + attr(o.id) + '" title="' + attr(o.name) + '" aria-label="' + attr('查看 ' + o.name) + '" style="--rarity:' + rarityColor(o) + '">' +
+      '<button class="mr-bond-op' + (onBoard.has(o.id) ? ' on-board' : '') + '" type="button" data-op-id="' + attr(o.id) + '" title="' + attr(o.name + (onBoard.has(o.id) ? '（棋盘上）' : '')) + '" aria-label="' + attr('查看 ' + o.name) + '" style="--rarity:' + rarityColor(o) + '">' +
         '<img src="' + avatarSrc(o.avatar) + '" alt="' + attr(o.name) + '" draggable="false" />' +
       '</button>').join('');
     return '<div class="mr-bond-detail">' +
-      (b.summary ? '<p>' + esc(b.summary) + '</p>' : '') +
-      '<div class="mr-bond-ops-wrap"><span class="mr-bond-ops-label">触发干员</span>' +
-        '<div class="mr-bond-ops">' + (avatars || '<span class="mr-note">当前棋盘没有该羁绊干员</span>') + '</div>' +
+      (b.summary ? '<p>' + linkedRich(b.summary) + '</p>' : '') +
+      '<div class="mr-bond-ops-wrap"><span class="mr-bond-ops-label">含有的干员 · 棋盘 ' + ops.filter((o) => onBoard.has(o.id)).length + ' / 名册 ' + ops.length + '</span>' +
+        '<div class="mr-bond-ops">' + (avatars || '<span class="mr-note">名册内没有该羁绊干员</span>') + '</div>' +
       '</div>' +
       (effects || '<p class="mr-note">暂无档位数据。</p>') +
-      (b.play ? '<p class="mr-bond-play"><b>本套怎么用</b>' + esc(b.play) + '</p>' : '') +
+      (b.play ? '<p class="mr-bond-play"><b>本套怎么用</b>' + linkedRich(b.play) + '</p>' : '') +
     '</div>';
   }
 
@@ -3413,7 +4100,7 @@
       return '<div class="mr-piece-skill' + (on ? ' on' : '') + '">' +
         '<div class="mr-piece-skill-head"><b>' + skillNumeral(i) + ' · ' + esc(s.name || '') + '</b>' +
           '<span>SP ' + esc(s.spCost ?? '—') + ' / 初动 ' + esc(s.initSp ?? '—') + (s.duration ? ' / ' + esc(s.duration) + 's' : '') + '</span></div>' +
-        '<p>' + esc(s.desc || '') + '</p>' +
+        '<p>' + rich(s.desc || '') + '</p>' +
       '</div>';
     }).join('');
     return '<section class="mr-piece-info" id="mrPieceInfo">' +
@@ -3427,8 +4114,8 @@
       '<div class="mr-piece-bonds">' + (bondRows || '<p class="mr-note">该干员没有羁绊数据。</p>') + '</div>' +
       '<div class="mr-piece-sub">特性</div>' +
       '<div class="mr-piece-text">' +
-        (o.trait ? '<p><b>基础</b>' + esc(o.trait) + '</p>' : '') +
-        (o.eliteTrait ? '<p><b>精锐</b>' + esc(o.eliteTrait) + '</p>' : '') +
+        (o.trait ? '<p><b>基础</b>' + linkedRich(o.trait) + '</p>' : '') +
+        (o.eliteTrait ? '<p><b>精锐</b>' + linkedRich(o.eliteTrait) + '</p>' : '') +
         (!o.trait && !o.eliteTrait ? '<p class="mr-note">资料库未收录特性。</p>' : '') +
       '</div>' +
       '<div class="mr-piece-sub">技能</div>' +
@@ -3718,7 +4405,7 @@
         '<span class="mr-kind ' + attr(s.kind || '') + '">' + strategyKind(s) + '</span>' +
         '<span class="mr-hp">HP ' + esc(s.initialHp ?? '—') + '</span>' +
       '</button>' +
-      '<p class="mr-effect">' + esc(s.effect || '') + '</p>' +
+      '<p class="mr-effect">' + rich(s.effect || '') + '</p>' +
       (editing ? '<div class="mr-strategy-actions">' +
         (label === '主盟约'
           ? '<button class="mr-action" type="button" data-strategy-edit>更换主盟约</button>'
@@ -3755,8 +4442,18 @@
     '</footer>';
 
     /* 10. sticky mode bar + fixed action dock + roster sheet */
+    // 编辑时顶栏多一组撤销 / 重做（底部 dock 四个位已满，且拇指够得着顶栏右侧）
+    const undoA = historyAttrs('undo');
+    const redoA = historyAttrs('redo');
+    const historyHtml = editing
+      ? '<div class="mr-history" role="group" aria-label="撤销与重做">' +
+          '<button class="mr-history-btn" type="button" data-history="undo" aria-label="撤销" aria-disabled="' + undoA.disabled + '" title="' + attr(undoA.title) + '">' + HISTORY_ICON.undo + '</button>' +
+          '<button class="mr-history-btn" type="button" data-history="redo" aria-label="重做" aria-disabled="' + redoA.disabled + '" title="' + attr(redoA.title) + '">' + HISTORY_ICON.redo + '</button>' +
+        '</div>'
+      : '';
     const topHtml = '<header class="mr-top">' +
       '<span class="mr-top-title"><b>卫戍协议 · 规程</b><span>' + (editing ? '编辑中 / EDIT' : '阅读版 / READ') + '</span></span>' +
+      historyHtml +
       '<div class="mr-switch" role="group" aria-label="显示模式">' +
         '<button class="mr-switch-btn on" type="button" data-view-mode="read" aria-pressed="true">阅读版</button>' +
         '<button class="mr-switch-btn" type="button" data-view-mode="poster" aria-pressed="false">海报</button>' +
@@ -3798,6 +4495,8 @@
      ------------------------------------------------------------ */
   function onClick(e) {
     if (Date.now() < suppressClickUntil) return;
+    const historyBtn = e.target.closest('[data-history]');
+    if (historyBtn) { stepHistory(historyBtn.dataset.history === 'redo' ? 'redo' : 'undo'); return; }
     if (mobileUI && editMode && mobileRange && !e.target.closest('.mr-cell') && !e.target.closest('.mr-piece-info')) clearMobileRangeDom();
     const mrRemove = e.target.closest('[data-mr-remove]');
     if (mrRemove) {
@@ -3953,6 +4652,26 @@
     if (mapTab) { openMaps(mapTab.dataset.mapId, 0); return; }
     const mapField = e.target.closest('[data-map-field]');
     if (mapField) { openMaps(mapSelectedId, Number(mapField.dataset.mapField)); return; }
+    if (e.target.closest('[data-detail-close]')) { closeDetailDrawer(); return; }
+    if (e.target.closest('[data-info-pop-close]')) { closeInfoPop(); return; }
+    if (e.target.closest('[data-term-back]')) { e.preventDefault(); termBack(); return; }
+    const termEl = e.target.closest('[data-term-bond], [data-term-equip], [data-term-kind]');
+    if (termEl) {
+      e.preventDefault();
+      const push = !!(infoPop && infoPop.contains(termEl));
+      if (termEl.dataset.termBond) openBondTerm(termEl.dataset.termBond, termEl, push);
+      else if (termEl.dataset.termEquip) openEquipTerm(termEl.dataset.termEquip, termEl, push);
+      else if (termEl.dataset.termKind) openKindTerm(termEl.dataset.termKind, termEl, push);
+      return;
+    }
+    const termOp = e.target.closest('[data-term-op]');
+    if (termOp) {
+      e.preventDefault();
+      const id = termOp.dataset.termOp;
+      closeInfoPop();
+      openDetail(id);
+      return;
+    }
     if (e.target.closest('[data-close]')) { closeModal(); return; }
     if (e.target.closest('[data-export-back]')) { closeModal(); return; }
     if (e.target.closest('[data-export-force]')) { closeModal(); exportPoster(true); return; }
@@ -3981,8 +4700,9 @@
     if (rfChip) {
       const group = rfChip.dataset.rfGroup;
       const value = rfChip.dataset.rfValue;
-      if (group === 'prof' || group === 'rarity' || group === 'trigger') {
-        const set = rosterFilter[group];
+      // 只认 rosterFilter 里真实存在的筛选组（以前这里还列着已删掉的 prof / rarity，点到会直接抛错）
+      const set = rosterFilter[group];
+      if (set instanceof Set) {
         if (value === 'all') set.clear();
         else if (set.has(value)) set.delete(value);
         else set.add(value);
@@ -3995,17 +4715,16 @@
     if (rfRemove) {
       const group = rfRemove.dataset.rfRemove;
       const value = rfRemove.dataset.rfValue;
-      if (group === 'bond') rosterFilter.bond = 'all';
+      if (group === 'bond') rosterFilter.bond.delete(value);
       else rosterFilter[group]?.delete(value);
       renderRosterFilters();
       filterRoster();
       return;
     }
     if (e.target.closest('[data-rf-clear]')) {
-      rosterFilter.prof.clear();
-      rosterFilter.rarity.clear();
       rosterFilter.trigger.clear();
-      rosterFilter.bond = 'all';
+      rosterFilter.kind.clear();
+      rosterFilter.bond.clear();
       renderRosterFilters();
       filterRoster();
       return;
@@ -4035,7 +4754,7 @@
     const coreRemove = e.target.closest('[data-core-remove]');
     if (coreRemove) { toggleCore(coreRemove.dataset.coreRemove, false); return; }
     const coreChip = e.target.closest('[data-core-op]');
-    if (coreChip) { toggleCore(coreChip.dataset.coreOp, !!e.target.closest('.modal')); return; }
+    if (coreChip) { toggleCore(coreChip.dataset.coreOp, !!e.target.closest('.modal, .detail-drawer')); return; }
 
     const facingBtn = e.target.closest('[data-facing-op]');
     if (facingBtn) {
@@ -4054,6 +4773,19 @@
       }
     }
 
+    const modulePick = e.target.closest('[data-module-pick]');
+    if (modulePick) {
+      const root = modulePick.closest('[data-detail-op]');
+      const opId = root?.dataset.detailOp;
+      const mid = modulePick.dataset.modulePick;
+      if (root && opId && mid) {
+        detailModulePick[opId] = mid;
+        root.querySelectorAll('[data-module-panel]').forEach((p) => { p.hidden = p.dataset.modulePanel !== mid; });
+        root.querySelectorAll('[data-module-pick]').forEach((b) => b.classList.toggle('on', b.dataset.modulePick === mid));
+      }
+      return;
+    }
+
     const setSkill = e.target.closest('[data-set-skill]');
     if (setSkill) {
       const o = op(setSkill.dataset.setSkill);
@@ -4069,8 +4801,6 @@
 
     if (editMode && e.target.closest('[data-edit]')) return;
 
-    const rosterDetail = e.target.closest('[data-roster-detail]');
-    if (rosterDetail) { openDetail(rosterDetail.dataset.rosterDetail); return; }
     const rosterItem = e.target.closest('[data-roster-id]');
     if (rosterItem) {
       if (editMode) selectRoster(rosterItem.dataset.rosterId);
@@ -4097,14 +4827,14 @@
         renderPoster();
         return;
       }
-      openBond(bondEl.dataset.bondId);
+      openBond(bondEl.dataset.bondId, bondEl);
       return;
     }
 
     const strategyRemove = e.target.closest('[data-strategy-remove]');
     if (strategyRemove) { e.preventDefault(); removeStrategy(strategyRemove.dataset.strategyRemove); return; }
     const strategyOpen = e.target.closest('[data-strategy-open]');
-    if (strategyOpen) { openStrategy(strategyOpen.dataset.strategyOpen); return; }
+    if (strategyOpen) { openStrategy(strategyOpen.dataset.strategyOpen, strategyOpen); return; }
     const strategyEdit = e.target.closest('[data-strategy-edit]');
     if (strategyEdit) { openStrategyPicker('main'); return; }
     const strategyAltAdd = e.target.closest('[data-strategy-alt-add]');
@@ -4141,7 +4871,7 @@
     }
 
     const bondRow = e.target.closest('.bond-row');
-    if (bondRow) { openBond(bondRow.dataset.bondId); return; }
+    if (bondRow) { openBond(bondRow.dataset.bondId, bondRow); return; }
 
     const opEl = e.target.closest('[data-op-id]');
     if (opEl) { openDetail(opEl.dataset.opId); return; }
@@ -4152,7 +4882,7 @@
   document.addEventListener('dblclick', (e) => {
     if (editMode) {
       const item = e.target.closest('.roster-item');
-      if (!item || e.target.closest('[data-roster-detail]')) return;
+      if (!item) return;
       openDetail(item.dataset.rosterId);
       return;
     }
@@ -4216,20 +4946,35 @@
       toast(state.meta.showQr ? '已开启：海报表头会印二维码' : '已关闭：海报不印二维码');
       return;
     }
-    if (e.target.id === 'rosterBond') { rosterFilter.bond = e.target.value; renderRosterFilters(); filterRoster(); }
   });
 
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
       if (mobileUI && mobileRosterOpen) { mobileRosterOpen = false; mobileRosterQuery = ''; renderPoster(); return; }
       if (pendingPlacement) cancelPendingPlacement();
+      else if (infoPop) closeInfoPop();
       else if ($('.modal')) closeModal();
+      else if ($('#detailDrawer')?.classList.contains('open')) closeDetailDrawer();
       else if (zoomMode) setZoomMode(false);
       else if (selectedRosterId) clearRosterSelection();
       else if (!$('#rosterDrawer')?.hidden) closeRoster();
       else if (!$('#equipmentDrawer')?.hidden) closeEquipmentLibrary();
       else if (!$('#variantDrawer')?.hidden) closeVariants();
       return;
+    }
+    if (e.key === 'Tab' && trapModalFocus(e)) return;
+    // Ctrl/⌘+Z 撤销，Ctrl/⌘+Y 或 Ctrl/⌘+Shift+Z 重做。
+    // 光标在文字里时不拦：那里交给浏览器自己的文字撤销（它触发的 input 事件照样会存进来）。
+    if ((e.ctrlKey || e.metaKey) && !e.altKey) {
+      const key = String(e.key || '').toLowerCase();
+      if (key === 'z' || key === 'y') {
+        const t = e.target;
+        const typing = !!t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName || ''));
+        if (typing || !editMode || $('.modal')) return;
+        e.preventDefault();
+        stepHistory(key === 'y' || e.shiftKey ? 'redo' : 'undo');
+        return;
+      }
     }
     if ((e.key === 'Enter' || e.key === ' ') && e.target.matches('[role="button"]') && !e.target.isContentEditable) {
       e.preventDefault(); e.target.click();
@@ -4247,7 +4992,7 @@
     let value = el.innerText.replace(/\u00a0/g, ' ').replace(/\r/g, '').replace(/\n+/g, ' ').trim();
     setPath(state, el.dataset.edit, value);
     updateCount(el);
-    saveSoon();
+    saveSoon('edit:' + el.dataset.edit);
   });
 
   document.addEventListener('focusout', (e) => {
@@ -4262,7 +5007,7 @@
       el.innerText = value;
       setPath(state, el.dataset.edit, value);
       updateCount(el);
-      saveSoon();
+      saveSoon('edit:' + el.dataset.edit);
       toast('已按上限截到 ' + max + ' 字', true);
     }
   });
@@ -4303,7 +5048,9 @@
   fitPoster();
   bindBoardDnD();
   bindMobileBoardDrag();
-  updateSaveState();
+  // 打开分享链接时上面已经真的写过一次存档；其余情况还没有任何改动，不谎报「已保存」
+  if (!sharedLoaded) setSaveState('idle');
+  initHistory();
   setTimeout(maybeShowZoomHint, 900);
   window.__posterDebug = {
     get state() { return state; },
@@ -4322,10 +5069,14 @@
     openEquipmentInfo,
     renderPoster,
     exportPoster,
+    get lastExport() { return lastExport; },
     posterCheck,
     migrate,
     toStorage: () => toStorageState(state),
     saveNow,
+    undo: () => stepHistory('undo'),
+    redo: () => stepHistory('redo'),
+    get historyDepth() { return { undo: timeline.past.length, redo: timeline.future.length }; },
     computeBondCounts,
     measureStrategyText,
     strategySlotInfo,

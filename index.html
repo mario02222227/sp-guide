@@ -6,14 +6,14 @@
   <title>卫戍协议 · 规程｜谢拉格冻结叠层一图流</title>
   <meta name="description" content="明日方舟「卫戍协议：规程」谢拉格冻结叠层一图流：主叠层、主输出、装备、站位与 1-14 回合路线。固定 4:3 海报，可编辑、可导出 3200×2400 PNG。" />
   <meta name="theme-color" content="#0b0706" />
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%230b0706'/%3E%3Cpath d='M14 44V20h8l10 14 10-14h8v24h-8V32L32 46 22 32v12z' fill='%23ffc400'/%3E%3C/svg%3E" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%230b0706'/%3E%3Cpath d='M14 44V20h8l10 14 10-14h8v24h-8V32L32 46 22 32v12z' fill='%23f6b61e'/%3E%3C/svg%3E" />
   <link rel="stylesheet" href="styles.css" />
   <link rel="stylesheet" href="regulation-theme.css" />
 </head>
 <body>
   <header class="appbar">
     <div class="appbar-actions">
-      <span class="save-state" id="saveState" aria-live="polite">已自动保存</span>
+      <span class="save-state" id="saveState" data-state="idle" aria-live="polite">改动自动保存在本机</span>
       <button class="btn btn-ghost" id="mapsBtn" type="button">
         <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M3 6l6-3 6 3 6-3v15l-6 3-6-3-6 3V6zm6-3v15m6-12v15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>
         <span>战场地图</span>
@@ -46,7 +46,7 @@
 
   <aside class="drawer drawer-left" id="rosterDrawer" hidden aria-label="干员库">
     <div class="drawer-head">
-      <div><strong>干员库</strong><span>拖到棋盘，或双击看详情；点选后点格子</span></div>
+      <div><strong>干员库</strong><span>行内看盟约与特质；拖到棋盘，或双击看完整详情</span></div>
       <button class="drawer-close" type="button" data-close-drawer="roster" aria-label="关闭干员库">×</button>
     </div>
     <div class="drawer-filters" id="rosterFilters"></div>
@@ -74,18 +74,33 @@
   <div class="edit-bar" id="editBar" hidden>
     <div class="edit-bar-copy">
       <strong>编辑模式</strong>
-      <span>改文字、拖站位、点装备/路线头像替换；改动自动保存。编辑装饰不会进入导出图。</span>
+      <span>改文字、拖站位、点装备/路线头像替换；改动自动保存，Ctrl+Z 撤销。编辑装饰不会进入导出图。</span>
     </div>
+    <!-- 按用途分四组：回退 / 摆阵容用的库 / 整份文件的进出 / 危险操作单独放最右 -->
     <div class="edit-bar-actions">
-      <button class="btn btn-small" id="newBtn" type="button">新建</button>
-      <button class="btn btn-small" id="boardBtn" type="button">棋盘</button>
-      <button class="btn btn-small" id="rosterBtn" type="button" aria-expanded="false">干员库</button>
-      <button class="btn btn-small" id="equipmentBtn" type="button" aria-expanded="false">装备库</button>
-      <button class="btn btn-small" id="variantBtn" type="button" aria-expanded="false">备选</button>
-      <button class="btn btn-small" id="saveBtn" type="button">存档</button>
-      <button class="btn btn-small" id="importBtn" type="button">导入</button>
-      <button class="btn btn-small" id="saveDataBtn" type="button">导出数据</button>
-      <button class="btn btn-small btn-danger" id="resetBtn" type="button">恢复示例</button>
+      <div class="edit-group" role="group" aria-label="撤销与重做">
+        <button class="btn btn-small btn-icon" id="undoBtn" type="button" data-history="undo" aria-label="撤销" aria-disabled="true" title="没有可撤销的操作">
+          <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M9 14 4 9l5-5M4 9h10a6 6 0 0 1 0 12h-3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+        <button class="btn btn-small btn-icon" id="redoBtn" type="button" data-history="redo" aria-label="重做" aria-disabled="true" title="没有可重做的操作">
+          <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="m15 14 5-5-5-5M20 9H10a6 6 0 0 0 0 12h3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+      </div>
+      <div class="edit-group" role="group" aria-label="阵容">
+        <button class="btn btn-small" id="rosterBtn" type="button" aria-expanded="false">干员库</button>
+        <button class="btn btn-small" id="equipmentBtn" type="button" aria-expanded="false">装备库</button>
+        <button class="btn btn-small" id="variantBtn" type="button" aria-expanded="false">备选</button>
+        <button class="btn btn-small" id="boardBtn" type="button">棋盘</button>
+      </div>
+      <div class="edit-group" role="group" aria-label="文件">
+        <button class="btn btn-small" id="newBtn" type="button">新建</button>
+        <button class="btn btn-small" id="saveBtn" type="button">存档</button>
+        <button class="btn btn-small" id="importBtn" type="button">导入</button>
+        <button class="btn btn-small" id="saveDataBtn" type="button">导出数据</button>
+      </div>
+      <div class="edit-group">
+        <button class="btn btn-small btn-danger" id="resetBtn" type="button">恢复示例</button>
+      </div>
     </div>
   </div>
 
@@ -178,6 +193,7 @@
   <script src="data/closure.js"></script>
   <script src="data/roster-prts.js"></script>
   <script src="data/prts.js"></script>
+  <script src="data/modules.js"></script>
   <script src="data/pinyin.js"></script>
   <script src="data/maps.js"></script>
   <script src="data.js"></script>
