@@ -164,7 +164,7 @@ schemaVersion: 3
 | data/modules.js | [可露希尔Wiki · 模组](https://closure.wiki/zh-cn/modules) | 未找到明确的站内文本/数据再使用许可；仅署名引用 | 模组名称、类型、L1–L3 属性加成与效果（`tools/fetch-modules.mjs` 抓取整理） |
 | data/prts.js | [PRTS](https://prts.wiki/) | CC BY-NC-SA 4.0（站点页脚） | 模组效果摘录（可选交叉核对；界面以 data/modules.js 的等级效果为准） |
 | data/maps.js | [PRTS · 战场一览](https://prts.wiki/w/%E5%8D%AB%E6%88%8D%E5%8D%8F%E8%AE%AE%C2%B7%E8%A7%84%E7%A8%8B/%E6%88%98%E5%9C%BA%E4%B8%80%E8%A7%88) | CC BY-NC-SA 4.0（站点页脚）；地图画面版权归鹰角 / Yostar | 地图编号、场地、地图装置与特殊地形说明 |
-| data/roster-prts.js | [PRTS](https://prts.wiki/) | CC BY-NC-SA 4.0 | 75 名当期补录干员的精英2数值、技能、职业分支、模组名 |
+| data/roster-prts.js | [PRTS](https://prts.wiki/) | CC BY-NC-SA 4.0 | 75 名当期补录干员的精英2数值、技能、职业分支、模组名（技能描述由 tools/fetch-skills.mjs 还原模板后生成） |
 | data/pinyin.js | 本项目用 pypinyin 生成 | pypinyin MIT | 141 名干员拼音检索数据 |
 | vendor/lz-string.min.js | [pieroxy/lz-string](https://github.com/pieroxy/lz-string) | MIT（LICENSES/lz-string-LICENSE.txt） | 分享码压缩 |
 | vendor/qrcode.js | [kazuhikoarase/qrcode-generator](https://github.com/kazuhikoarase/qrcode-generator) | MIT（LICENSES/qrcode-generator-MIT.txt） | 入口二维码 |
@@ -312,7 +312,7 @@ cd tests
 npm test
 ```
 
-`run.mjs` 当前 **242 项通过**，覆盖孤儿干员、用户字段迁移、bondPlay 清空、自动备份、导入/导出、v1/v2/v3 迁移、legacy.notes、次选 >2 迁移、羁绊计数、BONDS 全展开/双列、BOSS 联动、阶段候选、策略选择/详情/精要版、posterText 持久化、导出预检、360px 预算、两步选向、撤销放入、核心干员显式收录、盟约删除、阶段拖拽防问号、双击详情、拖拽朝向与攻击范围预览、装备库效果、干员多选筛选（扁平结果 + 标签）、筛选标题不压选项、战场地图图鉴、特质/羁绊/装备词条关联与单浮层返回、模组 L3 效果与多模组切换、`regulation-theme.css` 的黑条标题 / `РЕГЛАМЕНТ` / 六边形核心框 / 二维码入口页头、品阶色边框、贴边金色朝向三角、竖版长图 44px 朝向角标、空盟约区域在只读/导出态保留、141 人全部具备攻击范围（含乌啾 12 格）、PC 筛选可收起且偏好持久、交换位置保留各自朝向、装备区铅笔可编辑干员，以及移动端导出 3200×2400 不被缩进角落。另运行 `node tests/split-audit.mjs` 验证 66 名重叠干员 deep-equal、46 名旧库干员退役与 8 人 bonds 快照；`mobile-edit.mjs` 109 项（含手机触摸点两下不会误删棋子的回归）、`mobile.mjs` 68 项通过。
+`run.mjs` 当前 **245 项通过**，覆盖孤儿干员、用户字段迁移、bondPlay 清空、自动备份、导入/导出、v1/v2/v3 迁移、legacy.notes、次选 >2 迁移、羁绊计数、BONDS 全展开/双列、BOSS 联动、阶段候选、策略选择/详情/精要版、posterText 持久化、导出预检、360px 预算、两步选向、撤销放入、核心干员显式收录、盟约删除、阶段拖拽防问号、双击详情、拖拽朝向与攻击范围预览、装备库效果、干员多选筛选（扁平结果 + 标签）、筛选标题不压选项、战场地图图鉴、特质/羁绊/装备词条关联与单浮层返回、模组 L3 效果与多模组切换、`regulation-theme.css` 的黑条标题 / `РЕГЛАМЕНТ` / 六边形核心框 / 二维码入口页头、品阶色边框、贴边金色朝向三角、竖版长图 44px 朝向角标、空盟约区域在只读/导出态保留、141 人全部具备攻击范围（含乌啾 12 格）、技能描述无模板残留（奥尔佳 II 全句）、PC 筛选可收起且偏好持久、交换位置保留各自朝向、装备区铅笔可编辑干员，以及移动端导出 3200×2400 不被缩进角落。另运行 `node tests/split-audit.mjs` 验证 66 名重叠干员 deep-equal、46 名旧库干员退役与 8 人 bonds 快照；`mobile-edit.mjs` 109 项（含手机触摸点两下不会误删棋子的回归）、`mobile.mjs` 68 项通过。
 
 `spread.mjs` 当前 **54 项通过**，覆盖分享码回放（标题 / 实测 / 站位 / 技能）、分享码体积、入口二维码默认关闭与开关切换、放大模式、1080×2160 长图排版与导出、盟约「被动」标签在导出字体变宽时不竖排（含窄框回归）、棋盘 8×4 / 12×6 切换与溢出、成型节奏只保留阵容 + 文字框、帮助 / 空白模板署名、单文件构建无外链。
 
