@@ -1406,19 +1406,51 @@ body.mobile-ui.editing .mr-cell-remove { display: grid; }
 /* ---- 4. stage rhythm ---- */
 .mr-stages { display: grid; gap: 10px; margin-top: 10px; }
 .mr-stage { padding: 10px; border: 1px solid rgba(240,90,60,.4); background: rgba(0,0,0,.3); }
-.mr-stage-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.mr-stage-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .mr-stage-label { color: var(--lime); font: 800 16px/1.2 var(--font-mono); letter-spacing: .04em; }
+.mr-stage-tools { display: flex; align-items: center; gap: 6px; }
 .mr-stage-count { color: var(--faint); font: 14px/1 var(--font-mono); }
+.mr-stage-edit {
+  min-height: 32px; padding: 0 8px;
+  border: 1px solid rgba(246,182,30,.45); background: transparent;
+  color: var(--lime); font: 700 12px/1 var(--font-sans); cursor: pointer;
+}
+.mr-stage-edit:hover, .mr-stage-edit:focus-visible { border-color: var(--lime); background: rgba(246,182,30,.08); outline: 0; }
 .mr-stage-ops { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.mr-stage-op-wrap { position: relative; width: 44px; height: 44px; flex: 0 0 44px; }
 .mr-stage-op {
   width: 44px; height: 44px; padding: 0; overflow: hidden;
   border: 2px solid var(--rarity, var(--line)); background: #0a0605; cursor: pointer;
 }
 .mr-stage-op img { width: 100%; height: 100%; object-fit: cover; object-position: top center; }
 .mr-stage-op:hover, .mr-stage-op:focus-visible { border-color: var(--lime); outline: 0; }
+.mr-stage-remove {
+  position: absolute; right: -6px; top: -6px; z-index: 2;
+  width: 26px; height: 26px; padding: 0; display: grid; place-items: center;
+  border: 1px solid rgba(255,77,58,.8); background: #0a0605; color: var(--red);
+  font: 700 15px/1 var(--font-mono); cursor: pointer;
+}
+.mr-stage-remove:hover, .mr-stage-remove:focus-visible { border-color: var(--red); background: rgba(255,77,58,.16); outline: 0; }
+.mr-stage-add {
+  width: 44px; height: 44px; flex: 0 0 44px; display: grid; place-items: center;
+  border: 1px dashed rgba(246,182,30,.6); background: rgba(246,182,30,.05);
+  color: var(--lime); font: 700 24px/1 var(--font-mono); cursor: pointer;
+}
+.mr-stage-add:hover, .mr-stage-add:focus-visible { border-color: var(--lime); background: rgba(246,182,30,.12); outline: 0; }
 .mr-stage-note {
   margin-top: 8px; color: var(--orange);
   font-size: 14px; line-height: 1.7; white-space: pre-line; overflow-wrap: anywhere;
+}
+body.mobile-ui.editing .mr-stage-note[data-edit] {
+  display: block;
+  min-height: 44px; padding: 10px 9px; box-sizing: border-box;
+  border: 1px dashed rgba(255,138,61,.55); outline: 0;
+  background: rgba(255,138,61,.05);
+  -webkit-user-select: text; user-select: text;
+  touch-action: manipulation; cursor: text;
+}
+body.mobile-ui.editing .mr-stage-note[data-edit]:focus {
+  border-color: var(--lime); background: rgba(246,182,30,.08);
 }
 
 /* ---- 5. bonds ---- */

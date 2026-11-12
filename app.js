@@ -2270,6 +2270,20 @@
     }
     saveNow(); closeModal(); renderPoster(); renderVariants(); renderRoster(); toast('阶段已更新');
   }
+  function removeStageOperator(stageIndex, slot) {
+    const s = state.stages?.[stageIndex];
+    if (!s) return;
+    if (s.id === 'boss' && s.lineupSource === 'board') {
+      s.lineup = stageIds(s);
+      s.lineupSource = 'manual';
+    }
+    if (!Array.isArray(s.lineup)) return;
+    const i = Number(slot);
+    if (!Number.isInteger(i) || i < 0 || i >= s.lineup.length) return;
+    s.lineup.splice(i, 1);
+    saveNow(); renderPoster(); renderVariants(); renderRoster();
+    toast('已从阶段移除');
+  }
   function pickStageOperator(id) {
     if (!stagePickerCtx) return;
     assignStage(stagePickerCtx.stageIndex, stagePickerCtx.kind, id, stagePickerCtx.slot);
@@ -3620,12 +3634,23 @@
       const ids = stageIds(s).map((id) => op(id)).filter(Boolean);
       const note = String(s.note || '').trim();
       const noteMax = s.id === 'boss' ? 60 : 40;
+      const addHtml = editing && ids.length < 9
+        ? '<button class="mr-stage-add" type="button" data-mr-stage-add="' + i + '" aria-label="添加干员到 ' + attr(s.label || '') + '">+</button>'
+        : '';
+      const opsHtml = ids.length
+        ? '<div class="mr-stage-ops">' + ids.map((o, slot) =>
+            '<div class="mr-stage-op-wrap">' +
+              '<button class="mr-stage-op" type="button" data-op-id="' + attr(o.id) + '" data-mr-stage-index="' + i + '" data-mr-stage-slot="' + slot + '" style="--rarity:' + rarityColor(o) + '" aria-label="' + attr(editing ? '替换 ' + o.name : '查看 ' + o.name + ' 详情') + '"><img src="' + avatarSrc(o.avatar) + '" alt="' + attr(o.name) + '" draggable="false" /></button>' +
+              (editing ? '<button class="mr-stage-remove" type="button" data-mr-stage-remove="' + i + '" data-mr-stage-slot="' + slot + '" aria-label="从阶段移除 ' + attr(o.name) + '">×</button>' : '') +
+            '</div>').join('') + addHtml + '</div>'
+        : (editing ? '<div class="mr-stage-ops">' + addHtml + '</div>' : '<p class="mr-empty">这一阶段还没有阵容。</p>');
       return '<article class="mr-stage">' +
-        '<div class="mr-stage-head"><span class="mr-stage-label">' + esc(s.label || '') + '</span><span class="mr-stage-count">' + ids.length + ' 人</span></div>' +
-        (ids.length
-          ? '<div class="mr-stage-ops">' + ids.map((o) => '<button class="mr-stage-op" type="button" data-op-id="' + attr(o.id) + '" style="--rarity:' + rarityColor(o) + '" aria-label="' + attr('查看 ' + o.name + ' 详情') + '"><img src="' + avatarSrc(o.avatar) + '" alt="' + attr(o.name) + '" draggable="false" /></button>').join('') + '</div>'
-          : '<p class="mr-empty">这一阶段还没有阵容。</p>') +
-        ((note || editing) ? '<p class="mr-stage-note"' + mobileEditAttrs('stages.' + i + '.note', noteMax, s.id === 'boss' ? '点此写 Boss 阶段要点' : '点此写阶段要点') + '>' + esc(note) + '</p>' : '') +
+        '<div class="mr-stage-head"><span class="mr-stage-label">' + esc(s.label || '') + '</span>' +
+          '<span class="mr-stage-tools"><span class="mr-stage-count">' + ids.length + ' 人</span>' +
+            (editing ? '<button class="mr-stage-edit" type="button" data-mr-note-focus="' + i + '" aria-label="编辑 ' + attr(s.label || '') + ' 阶段备注">改备注</button>' : '') +
+          '</span></div>' +
+        opsHtml +
+        ((note || editing) ? '<p class="mr-stage-note"' + mobileEditAttrs('stages.' + i + '.note', noteMax, '点此写阶段备注') + '>' + esc(note) + '</p>' : '') +
       '</article>';
     }).join('') : '<p class="mr-empty">还没有阶段数据。</p>';
 
@@ -3817,6 +3842,35 @@
       mobileRosterOpen = false;
       mobileRosterQuery = '';
       renderPoster();
+      return;
+    }
+    const mrNoteFocus = e.target.closest('[data-mr-note-focus]');
+    if (mrNoteFocus) {
+      const note = $$('.mr-stage-note')[Number(mrNoteFocus.dataset.mrNoteFocus)];
+      if (note) {
+        note.focus();
+        const range = document.createRange();
+        range.selectNodeContents(note);
+        range.collapse(false);
+        const sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+      }
+      return;
+    }
+    const mrStageRemove = e.target.closest('[data-mr-stage-remove]');
+    if (mrStageRemove) {
+      removeStageOperator(Number(mrStageRemove.dataset.mrStageRemove), Number(mrStageRemove.dataset.mrStageSlot));
+      return;
+    }
+    const mrStageAdd = e.target.closest('[data-mr-stage-add]');
+    if (mrStageAdd) {
+      openStagePicker(Number(mrStageAdd.dataset.mrStageAdd), 'lineup', null);
+      return;
+    }
+    const mrStageOp = e.target.closest('.mr-stage-op');
+    if (mrStageOp && mobileUI && editMode) {
+      openStagePicker(Number(mrStageOp.dataset.mrStageIndex), 'lineup', Number(mrStageOp.dataset.mrStageSlot));
       return;
     }
     const mrOp = e.target.closest('[data-mr-op-id]');
