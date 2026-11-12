@@ -1810,7 +1810,26 @@
     o.module = p.moduleName ? { name: p.moduleName, type: p.moduleType || '' } : o.module;
     o.prtsSource = p.source;
     o.avatar = 'assets/avatars/' + o.id + '.webp';
-    o.missingFields = ['rangeGrid', 'moduleEffect'];
+  }
+
+  // 攻击范围：stronghold 那 112 人自带 rangeGrid；其余干员的范围由
+  // tools/fetch-ranges.mjs 从 PRTS 抓取后写进 data/ranges.js。
+  const rangeData = window.SP_RANGES || { operators: {} };
+  for (const o of Object.values(operators)) {
+    const grid = rangeData.operators?.[o.name];
+    if (!(Array.isArray(o.rangeGrid) && o.rangeGrid.length) && Array.isArray(grid) && grid.length) {
+      o.rangeGrid = grid;
+      o.rangeSource = rangeData.source || 'https://prts.wiki';
+    }
+  }
+
+  // 缺失标记按实际字段算，不再一律写死。
+  for (const o of Object.values(operators)) {
+    o.missingFields = [];
+    if (!(o.rangeGrid || []).length) o.missingFields.push('rangeGrid');
+    if (!(o.skills || []).length) o.missingFields.push('skills');
+    if (!o.stats || !Object.keys(o.stats).length) o.missingFields.push('stats');
+    o.missingData = o.missingFields.length > 0;
   }
   const bondLibrary = {};
   for (const [id, b] of Object.entries(cl.bondLibrary || {})) {
