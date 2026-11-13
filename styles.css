@@ -719,7 +719,7 @@ body.detail-open .stage { padding-right: calc(var(--detail-w) + 16px); }
 /* 卡牌式干员栏：头像 / 名字是主体，核心·附加盟约和基础特质直接摊在行内 */
 .roster-item {
   display: grid; grid-template-columns: 46px minmax(0,1fr); gap: 0 8px; align-items: start;
-  padding: 8px 7px; border: 1px solid transparent; border-bottom-color: rgba(74,43,36,.7); cursor: grab;
+  padding: 8px 4px; border: 1px solid transparent; border-bottom-color: rgba(74,43,36,.7); cursor: grab;
 }
 .roster-item:hover { background: rgba(var(--accent-rgb),.035); border-color: rgba(var(--accent-rgb),.2); }
 /* 「已拿起、等着点格子」是瞬时状态，用冷色，和棋盘上亮起的可落格同色 */
@@ -742,6 +742,9 @@ body.detail-open .stage { padding-right: calc(var(--detail-w) + 16px); }
 .roster-trait {
   margin-top: 4px; padding-bottom: 2px; color: var(--muted); font-size: 12px; line-height: 1.5;
   display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 4; overflow: hidden;
+  /* 均衡折行：默认贪心会把「层数 +1 …」整段甩到下一行、上一行只剩【盟约】；
+     均衡后各行长度接近，不会出现半行空白。 */
+  text-wrap: balance;
 }
 .roster-trait.empty { color: var(--faint); font-size: 11px; }
 .roster-trait-kind {
@@ -1021,6 +1024,7 @@ body.editing .stage-fill, body.editing .stage-restore { display: inline-flex; }
 .stage-pick img { width: 40px; height: 40px; object-fit: cover; border: 1px solid var(--rarity, var(--line)); }
 .stage-pick span { font-size: 12px; line-height: 1.2; text-align: center; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
 .stage-pick:hover { border-color: var(--accent); }
+.stage-pick.on { border-color: var(--accent); background: rgba(var(--accent-rgb),.12); color: var(--accent); }
 .stage-pick-empty { color: var(--faint); font-size: 12px; padding: 8px; }
 .bond-row.reached { border-left: 4px solid var(--accent); padding-left: 4px; background: rgba(var(--accent-rgb),.045); }
 .bond-row.unreached { color: #a38d7a; }
@@ -1694,6 +1698,24 @@ body.mobile-ui.editing .mr-stage-note[data-edit]:focus {
   display: flex; flex-direction: column; align-items: center; gap: 3px;
   min-width: 0; padding: 0; border: 0; background: transparent; color: var(--cream, var(--ink)); cursor: pointer;
 }
+.mr-equip-op-wrap { position: relative; min-width: 0; }
+.mr-equip-swap {
+  position: absolute; top: -4px; right: -4px; z-index: 2;
+  width: 26px; height: 26px; padding: 0; display: grid; place-items: center;
+  border: 1px solid rgba(var(--accent-rgb),.6); background: rgba(10,6,5,.94);
+  color: var(--accent); font: 13px/1 var(--font-sans); cursor: pointer;
+}
+/* 手机端换人选择器 */
+.mr-equip-pick-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(72px, 1fr)); gap: 6px; margin-top: 6px; max-height: 46vh; overflow: auto; }
+.mr-equip-pick {
+  display: flex; flex-direction: column; align-items: center; gap: 3px;
+  padding: 5px 3px; border: 1px solid var(--line); background: rgba(10,6,5,.55);
+  color: var(--ink-soft); cursor: pointer; min-width: 0;
+}
+.mr-equip-pick img { width: 46px; height: 46px; object-fit: cover; object-position: top center; border: 2px solid var(--rarity, var(--line)); }
+.mr-equip-pick span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.mr-equip-pick i { color: var(--faint); font: 10px/1.2 var(--font-mono); font-style: normal; }
+.mr-equip-pick.on { border-color: var(--accent); background: rgba(var(--accent-rgb),.12); color: var(--accent); }
 .mr-equip-op img { width: 44px; height: 44px; object-fit: cover; object-position: top center; border: 2px solid var(--rarity, var(--line)); }
 .mr-equip-op span { width: 100%; font-size: 14px; line-height: 1.2; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .mr-equip-col { min-width: 0; display: flex; flex-direction: column; align-items: center; gap: 4px; border-left: 1px solid rgba(240,90,60,.2); }
@@ -2057,7 +2079,6 @@ body.mobile-ui .equip-detail-modal { margin-top: 8px; }
   --kw-state: var(--steel-1, #d5d8d9);
   --kw-state-line: rgba(213,216,217,.8);
   --kw-name: var(--cream, #f1e6d0);
-  --kw-name-shadow: var(--red-1, #c43a2c);
   --kw-bracket: var(--gold);
 }
 .skill-desc { color: var(--ink-soft); line-height: 2; }
@@ -2086,12 +2107,11 @@ body.mobile-ui .equip-detail-modal { margin-top: 8px; }
   border-bottom: 1px dashed var(--kw-state-line); padding-bottom: 1px;
 }
 
-/* 【萨尔贡】：奶白加粗 + 红色硬阴影，括号金色 */
+/* 【萨尔贡】：奶白加粗，括号金色；不再加红色硬阴影。 */
 .kw-name {
   color: var(--kw-name); font-weight: 800;
-  text-shadow: 2px 2px 0 var(--kw-name-shadow);
 }
-.kw-name i { font-style: normal; color: var(--kw-bracket); text-shadow: none; }
+.kw-name i { font-style: normal; color: var(--kw-bracket); }
 
 /* 小字号处（技能卡 / 特质卡 / 手机端）收一点内边距，避免徽章挤行 */
 .skill-main p .tag-phase, .trait-card p .tag-phase, .talent p .tag-phase,

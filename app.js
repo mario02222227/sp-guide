@@ -905,7 +905,7 @@
 
   function renderEquipment() {
     const head = '<div class="equip-header"><span></span><span>必做</span><span>大提升</span><span>可选</span></div>';
-    const rows = (state.equipment || []).slice(0, 3).map((row) => {
+    const rows = (state.equipment || []).slice(0, 3).map((row, rowIndex) => {
       const o = op(row.operatorId);
       if (!o) return '';
       const cols = ['must', 'big', 'optional'].map((slot) => {
@@ -914,9 +914,9 @@
         const add = editMode && (row[slot] || []).length < 3 ? '<button class="equip-add edit-only" type="button" data-equip-add data-equip-drop="1" data-op-id="' + attr(o.id) + '" data-slot="' + slot + '" title="添加装备（也可从装备库拖入）">+</button>' : '';
         return '<div class="equip-col">' + icons + add + '</div>';
       }).join('');
-      // 装备区也要能改这颗棋子：编辑态给头像角上加一个铅笔按钮
+      // 角上的按钮换的是「这一行归谁用」，不是改干员资料。
       const editBadge = editMode
-        ? '<button class="equip-edit edit-only" type="button" data-edit-op="' + attr(o.id) + '" title="编辑干员" aria-label="' + attr('编辑 ' + o.name) + '">✎</button>'
+        ? '<button class="equip-edit edit-only" type="button" data-equip-swap="' + rowIndex + '" title="更换这一行的干员" aria-label="' + attr('更换 ' + o.name) + '">⇄</button>'
         : '';
       return '<div class="equip-row">' +
         '<div class="equip-avatar" data-op-id="' + attr(o.id) + '" role="button" tabindex="0" aria-label="查看' + attr(o.name) + '" style="--rarity:' + rarityColor(o) + '"><img src="' + avatarSrc(o.avatar) + '" alt="' + attr(o.name) + '" draggable="false" />' + editBadge + '</div>' +
@@ -2402,9 +2402,12 @@
     const core = (state.coreOperators || []).filter((c) => placedIds.includes(c.operatorId));
     state.coreOperators = core;
     // 装备位保留已有 3 行；新上场的干员只在还有空位时补一行。
+    // manual 行是手动换过干员的，即使那名干员没上场也留着，否则换完就被同步清掉。
     const nextEq = [];
     for (const row of (state.equipment || [])) {
-      if (!placedIds.includes(row.operatorId)) continue;
+      if (!row.operatorId) continue;
+      if (!placedIds.includes(row.operatorId) && !row.manual) continue;
+      if (nextEq.length >= 3) continue;
       if (nextEq.some((r) => r.operatorId === row.operatorId)) continue;
       nextEq.push(row);
     }
@@ -2863,6 +2866,94 @@
     renderPoster();
     renderEquipmentLibrary();
     toast('装备已更新');
+  }
+
+  /* 装备区的「⇄」换的是这一行归谁用，不是改干员资料。
+     棋盘只自动分配前 3 名上场干员，手动换过之后这一行会固定住（manual）。 */
+  let equipSwapRow = null;
+  function openEquipSwap(rowIndex) {
+    if (!editMode) return;
+    const rows = state.equipment || [];
+    if (!rows[rowIndex]) return;
+    equipSwapRow = rowIndex;
+    const currentId = rows[rowIndex].operatorId;
+    const boardIds = [...(state.board?.placements || [])].sort((a, b) => (a.row - b.row) || (a.col - b.col)).map((p) => p.operatorId);
+    const placed = new Set(boardIds);
+    const btn = (o) => {
+      const onRow = rows.some((r) => r.operatorId === o.id);
+      return '<button class="stage-pick' + (o.id === currentId ? ' on' : '') + '" type="button" data-equip-pick="' + attr(o.id) + '" title="' + attr(o.name + (onRow ? '（已在装备区）' : '')) + '" style="--rarity:' + rarityColor(o) + '"><img src="' + avatarSrc(o.avatar) + '" alt="" draggable="false" /><span>' + esc(o.name) + '</span></button>';
+    };
+    const boardHtml = boardIds.length ? boardIds.map((id) => op(id)).filter(Boolean).map(btn).join('') : '<div class="stage-pick-empty">棋盘上还没有干员</div>';
+    const rest = Object.values(state.operators || {}).filter((o) => !placed.has(o.id)).sort((a, b) => a.name.localeCompare(b.name, 'zh'));
+    const restHtml = rest.map(btn).join('');
+    const body = '<div class="modal-body">' +
+      '<div class="detail-kicker">EQUIP / 更换干员</div>' +
+      '<h2 class="detail-name" style="font-size:28px">这一行给谁用</h2>' +
+      '<p class="detail-note">当前：' + esc(op(currentId)?.name || currentId) + '。换人后这一行固定给新干员，棋盘再变动也不会被自动顶掉；原有装备会清空。</p>' +
+      '<section class="stage-pick-group"><h4>棋盘阵容</h4><div class="stage-pick-grid">' + boardHtml + '</div></section>' +
+      '<details class="stage-pick-group"><summary>全部干员</summary><div class="stage-pick-grid">' + restHtml + '</div></details>' +
+      '<div class="form-actions"><button class="btn" type="button" data-close>取消</button></div>' +
+    '</div>';
+    openModal(body);
+  }
+  function swapEquipmentOperator(rowIndex, id) {
+    if (!hasOperator(id)) return;
+    const rows = state.equipment || [];
+    const row = rows[rowIndex];
+    if (!row) return;
+    const other = rows.findIndex((r, i) => i !== rowIndex && r.operatorId === id);
+    if (other >= 0) {
+      // 目标已经在别的行：整行互换，各自的装备跟着人走
+      const tmp = rows[rowIndex];
+      rows[rowIndex] = rows[other];
+      rows[other] = tmp;
+      rows[rowIndex].manual = true;
+      rows[other].manual = true;
+      toast('已交换装备区的两位干员');
+    } else {
+      rows[rowIndex] = { operatorId: id, must: [], big: [], optional: [], manual: true };
+      toast('装备区已换成「' + (op(id)?.name || id) + '」');
+    }
+    state.equipment = rows;
+    equipSwapRow = null;
+    saveNow();
+    closeModal();
+    renderPoster();
+    renderRoster();
+    renderVariants();
+  }
+  function pickEquipOperator(id) {
+    if (equipSwapRow === null) return;
+    swapEquipmentOperator(equipSwapRow, id);
+  }
+  /* 手机端同一套语义：全屏 sheet 里选人，选完这一行就固定给新干员。 */
+  function openMobileEquipSwap(rowIndex) {
+    if (!editMode) return;
+    const rows = state.equipment || [];
+    if (!rows[rowIndex]) return;
+    equipSwapRow = rowIndex;
+    const currentId = rows[rowIndex].operatorId;
+    const boardIds = [...(state.board?.placements || [])].sort((a, b) => (a.row - b.row) || (a.col - b.col)).map((p) => p.operatorId);
+    const placed = new Set(boardIds);
+    const cell = (o) => {
+      const onRow = rows.some((r) => r.operatorId === o.id);
+      return '<button class="mr-equip-pick' + (o.id === currentId ? ' on' : '') + '" type="button" data-mr-equip-pick="' + attr(o.id) + '" style="--rarity:' + rarityColor(o) + '" aria-label="' + attr(o.name) + '">' +
+        '<img src="' + avatarSrc(o.avatar) + '" alt="" draggable="false" />' +
+        '<span>' + esc(o.name) + '</span>' +
+        (onRow ? '<i>已在装备区</i>' : '') +
+      '</button>';
+    };
+    const boardHtml = boardIds.length ? boardIds.map((id) => op(id)).filter(Boolean).map(cell).join('') : '<p class="mr-note">棋盘上还没有干员</p>';
+    const rest = Object.values(state.operators || {}).filter((o) => !placed.has(o.id)).sort((a, b) => a.name.localeCompare(b.name, 'zh'));
+    const body = '<div class="modal-body">' +
+      '<div class="detail-kicker">EQUIP / 更换干员</div>' +
+      '<h2 class="detail-name" style="font-size:24px">这一行给谁用</h2>' +
+      '<p class="detail-note">当前：' + esc(op(currentId)?.name || currentId) + '。换人后这一行固定给新干员，棋盘再变动也不会被顶掉；原有装备会清空。</p>' +
+      '<section class="stage-pick-group"><h4>棋盘阵容</h4><div class="mr-equip-pick-grid">' + boardHtml + '</div></section>' +
+      '<details class="stage-pick-group"><summary>全部干员</summary><div class="mr-equip-pick-grid">' + rest.map(cell).join('') + '</div></details>' +
+      '<div class="form-actions"><button class="btn" type="button" data-close>取消</button></div>' +
+    '</div>';
+    openModal(body);
   }
 
   const MAP_DATA = window.SP_MAPS || { maps: [], missing: [] };
@@ -4394,7 +4485,7 @@
 
     /* 6. equipment */
     const eqRows = (state.equipment || []).slice(0, 3);
-    const eqHtml = eqRows.length ? eqRows.map((row) => {
+    const eqHtml = eqRows.length ? eqRows.map((row, rowIndex) => {
       const o = op(row.operatorId);
       if (!o) return '';
       const colsHtml = ['must', 'big', 'optional'].map((slot) => {
@@ -4407,11 +4498,17 @@
         return '<div class="mr-equip-col"><span class="mr-equip-label">' + ({ must: '必做', big: '大提升', optional: '可选' }[slot]) + '</span>' +
           '<div class="mr-equip-icons">' + (icons + add || '<span class="mr-equip-none">—</span>') + '</div></div>';
       }).join('');
+      // 和 PC 一致：编辑态头像角上的 ⇄ 换的是「这一行给谁用」
+      const swapBtn = editing
+        ? '<button class="mr-equip-swap" type="button" data-mr-equip-swap="' + rowIndex + '" aria-label="' + attr('更换 ' + o.name) + '" title="更换这一行的干员">⇄</button>'
+        : '';
       return '<div class="mr-equip-row">' +
-        '<button class="mr-equip-op" type="button" data-op-id="' + attr(o.id) + '" style="--rarity:' + rarityColor(o) + '" aria-label="' + attr('查看 ' + o.name + ' 详情') + '">' +
-          '<img src="' + avatarSrc(o.avatar) + '" alt="' + attr(o.name) + '" draggable="false" />' +
-          '<span>' + esc(o.name) + '</span>' +
-        '</button>' + colsHtml +
+        '<div class="mr-equip-op-wrap">' +
+          '<button class="mr-equip-op" type="button" data-op-id="' + attr(o.id) + '" style="--rarity:' + rarityColor(o) + '" aria-label="' + attr('查看 ' + o.name + ' 详情') + '">' +
+            '<img src="' + avatarSrc(o.avatar) + '" alt="' + attr(o.name) + '" draggable="false" />' +
+            '<span>' + esc(o.name) + '</span>' +
+          '</button>' + swapBtn +
+        '</div>' + colsHtml +
       '</div>';
     }).join('') : '<p class="mr-empty">还没有装备位。</p>';
     const eqSection = '<section class="mr-section">' +
@@ -4614,6 +4711,10 @@
     if (e.target.closest('[data-view-share]')) { openShare(); return; }
     if (e.target.closest('[data-view-export]')) { exportPoster(); return; }
     if (e.target.closest('#readBtn')) { setViewMode('read'); return; }
+    const mrEquipSwap = e.target.closest('[data-mr-equip-swap]');
+    if (mrEquipSwap) { openMobileEquipSwap(Number(mrEquipSwap.dataset.mrEquipSwap)); return; }
+    const mrEquipPick = e.target.closest('[data-mr-equip-pick]');
+    if (mrEquipPick) { pickEquipOperator(mrEquipPick.dataset.mrEquipPick); return; }
     const mrEquip = e.target.closest('[data-mr-equip]');
     if (mrEquip) {
       if (mobileUI) {
@@ -4844,6 +4945,11 @@
     if (pick) { previewItem(pick.dataset.pickItem); return; }
     if (e.target.closest('[data-pick-confirm]')) { pickItem(itemPickerPreview); return; }
     if (e.target.closest('[data-pick-clear]')) { clearPicker(); return; }
+
+    const equipSwap = e.target.closest('[data-equip-swap]');
+    if (equipSwap) { openEquipSwap(Number(equipSwap.dataset.equipSwap)); return; }
+    const equipPick = e.target.closest('[data-equip-pick]');
+    if (equipPick) { pickEquipOperator(equipPick.dataset.equipPick); return; }
 
     const editOp = e.target.closest('[data-edit-op]');
     if (editOp) { openOperatorEditor(editOp.dataset.editOp); return; }
