@@ -34,10 +34,16 @@
 (() => {
   'use strict';
 
-  const STORAGE_KEY = 'sp-guide-poster-v2';
-  const OLD_STORAGE_KEY = 'sp-guide-03-v1';
-  const SAVES_KEY = 'sp-guide-poster-saves-v1';
-  const VIEW_MODE_KEY = 'sp-view-mode-v1';
+  // 同一个工具可以带多个示例：?preset=ursus 使用独立的草稿槽，
+  // 不会把谢拉格示例的本地存档覆盖掉。
+  const PRESET = (() => {
+    try { return new URLSearchParams(location.search).get('preset') || ''; } catch (e) { return ''; }
+  })();
+  const PRESET_SUFFIX = PRESET ? ':' + PRESET : '';
+  const STORAGE_KEY = 'sp-guide-poster-v2' + PRESET_SUFFIX;
+  const OLD_STORAGE_KEY = 'sp-guide-03-v1' + PRESET_SUFFIX;
+  const SAVES_KEY = 'sp-guide-poster-saves-v1' + PRESET_SUFFIX;
+  const VIEW_MODE_KEY = 'sp-view-mode-v1' + PRESET_SUFFIX;
   const SCHEMA_VERSION = 3;
   const DEFAULT_DATA = window.GUIDE_DATA;
   const ASSETS = window.ASSET_DATA || {};
@@ -71,6 +77,8 @@
   const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 
   const RARITY = { 6: '#ff9b2f', 5: '#ffd25e', 4: '#b79cff', 3: '#73e3ee', 2: '#9fc9a0', 1: '#a99e93' };
+  const TIER_COLORS = { I: '#a6b0bb', II: '#72cf91', III: '#63b3ff', IV: '#bd8cff', V: '#ffb44f', VI: '#ff6656' };
+  const tierColor = (o) => TIER_COLORS[bondTier(o)] || 'rgba(242,227,206,.42)';
   const ROLE = { stack: '#ffc400', dps: '#ff7a2f', engine: '#ffb347', tank: '#d6a45c', support: '#d8cbb8', flex: '#a9937e' };
   const PROF = {
     '术师': '<path d="M10 1.5l1.9 6.6L18.5 10l-6.6 1.9L10 18.5l-1.9-6.6L1.5 10l6.6-1.9z"/>',
@@ -93,9 +101,12 @@
   const AVATAR_LABELS = { sbell2: '圣聆初雪', pramanix: '初雪', gnosis: '灵知', kjera: '耶拉', yak: '角峰', harold: '哈洛德', svash2: '凛御银灰', degen: '锏', snhunt: '雪猎', aurora: '极光', bldsk: '华法琳', cetsyr: '魔王', archet: '空弦', lisa: '铃兰' };
   const SHARE_PREFIX = '#s=';
   const SHARE_WARN_LEN = 2000;
+  const BENCH_SIZE = 10;
+  const EQUIP_MAX = 2;
 
   let editMode = false;
   let pendingToast = '';
+  let equipmentTrimmed = false;
   let saveTimer = 0;
   /* Mobile reading view. `renderMobile` is a no-op until the view module below
      is initialised; renderPoster() calls it so every mutator repaints both views. */
@@ -109,10 +120,27 @@
   let mobileBondOpen = '';
   let mobileEquipOpen = null;
   let mobileFilterOpen = true;
-  let mobileFilter = { trigger: new Set(), kind: new Set(), bond: new Set() };
+  let mobileFilter = { tier: new Set(), trigger: new Set(), kind: new Set(), bond: new Set() };
+  let flowOpen = false;
+  let flowStep = 0;
+  let flowPicked = [];
+  let flowBoard = null;
+  let flowBench = [];
+  let flowStages = null;
+  let flowSnapshot = null;
+  let flowQuery = '';
+  let flowBond = 'all';
+  let flowKind = 'all';
+  let flowTrigger = 'all';
+  let flowTier = 'all';
+  let flowDetailId = '';
+  let flowStrategyQuery = '';
+  let flowDrag = null;
+  let flowSuppressClickUntil = 0;
+  let flowSelected = '';
   let selectedRosterId = null;
   let detailModulePick = {};
-  let rosterFilter = { q: '', trigger: new Set(), kind: new Set(), bond: new Set() };
+  let rosterFilter = { q: '', tier: new Set(), trigger: new Set(), kind: new Set(), bond: new Set() };
   const TRIGGER_DEFS = [
     { id: 'battle', label: '战斗中', re: /战斗中/ },
     { id: 'obtain', label: '获得时', re: /获得时/ },
@@ -141,6 +169,9 @@
   const isCoreBond = (id) => BOND_CORE_IDS.has(id);
   const operatorTraitText = (o) => [o?.trait, o?.eliteTrait].filter(Boolean).join('\n');
   const operatorTriggers = (o) => TRIGGER_DEFS.filter((t) => t.re.test(operatorTraitText(o))).map((t) => t.id);
+  const TIER_ORDER = ['I', 'II', 'III', 'IV', 'V', 'VI'];
+  const operatorTier = (o) => String(o?.tier || '').replace(/阶$/, '');
+  const operatorTierTest = (tier) => (o) => operatorTier(o) === tier;
   /* 特质开头那段就是卫戍能力的类型（持续叠加 / 单次叠加 / 作战能力 / 整备能力 / 特异化）。
      数据里没有独立字段，只有文本前缀，所以按前缀解析，供筛选和样式复用。 */
   const TRAIT_KINDS = ['持续叠加', '单次叠加', '作战能力', '整备能力', '特异化'];
@@ -429,7 +460,7 @@
   }
 
   // 调用方传精简形态（toStorageState）或原始旧存档，不要传完整 state：
-  // 完整 state 带着整份干员 / 羁绊资料库（约 340KB），三份备份就能把 localStorage 配额吃掉一大块。
+  // 完整 state 带着整份干员 / 盟约资料库（约 340KB），三份备份就能把 localStorage 配额吃掉一大块。
   function backup(key, data) {
     try {
       const stamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -597,6 +628,12 @@
       if (out.bondLibrary[id]) out.bondLibrary[id].play = play;
     }
     out.legacy = deepMerge(out.legacy || {}, stored.legacy || {});
+    const eq = normalizeEquipment(out.equipment || []);
+    out.equipment = eq.rows;
+    if (eq.trimmed) {
+      equipmentTrimmed = !pendingToast;
+      if (!pendingToast) pendingToast = '已按每人 2 件装备整理';
+    }
     out.schemaVersion = 3;
     return out;
   }
@@ -683,6 +720,7 @@
   })();
   let saves = readSaves();
 
+  const isGateCell = (row, col) => (state.meta?.boardGates || []).some((g) => Number(g.col) === Number(col));
   const op = (id) => {
     const found = state.operators?.[id];
     if (found) return found;
@@ -757,27 +795,50 @@
     if (!id) return '';
     return '<span class="bond-badge"><img src="' + attr(bondIcon(id)) + '" alt="" /></span>';
   }
+  function coreEquipHtml(o) {
+    if (!state.meta?.equipmentInCore) return '';
+    const row = (state.equipment || []).find((e) => e.operatorId === o.id);
+    const slots = ['must', 'big', 'optional'];
+    const all = [];
+    for (const slot of slots) {
+      const keys = Array.isArray(row?.[slot]) ? row[slot] : [];
+      keys.forEach((key, index) => all.push({ key, slot, index }));
+    }
+    if (!all.length && !editMode && !flowOpen) return '';
+    const shown = all.slice(0, EQUIP_MAX);
+    const targetSlot = slots.find((slot) => (row?.[slot] || []).length < 3) || 'must';
+    const label = { must: '必做', big: '大提升', optional: '可选' };
+    const buttons = shown.map((x) =>
+      '<button class="core-equip-slot filled" type="button" data-equip-icon="' + attr(x.key) + '" data-equip-drop="1" data-op-id="' + attr(o.id) + '" data-slot="' + x.slot + '" data-index="' + x.index + '" title="' + attr(item(x.key) + ' · ' + label[x.slot]) + '">' +
+        '<img src="' + itemSrc(x.key) + '" alt="" draggable="false" /></button>').join('');
+    const addCount = (editMode || flowOpen) && canAddEquip(row) ? EQUIP_MAX - shown.length : 0;
+    const add = Array.from({ length: Math.max(0, addCount) }, () =>
+      '<button class="core-equip-slot add" type="button" data-equip-add data-equip-drop="1" data-op-id="' + attr(o.id) + '" data-slot="' + targetSlot + '" title="给' + attr(o.name) + '添加装备">+</button>').join('');
+    return (buttons || add) ? '<div class="core-equip">' + buttons + add + '</div>' : '';
+  }
+
   function coreCard(c) {
     const o = op(c.operatorId);
     if (!o) return '';
     const sk = skillOf(o);
     const skillTitle = sk ? ('技能 ' + skillNumeral(o.skillIdx) + '：' + sk.name) : '未配置技能';
-    return '<div class="core-card" data-op-id="' + attr(o.id) + '" role="button" tabindex="0" aria-label="查看' + attr(o.name) + '" style="--rarity:' + rarityColor(o) + ';--role:' + roleColor(o) + '">' +
+    return '<div class="core-card" data-op-id="' + attr(o.id) + '" role="button" tabindex="0" aria-label="查看' + attr(o.name) + '" style="--tier-color:' + tierColor(o) + ';--rarity:' + rarityColor(o) + ';--role:' + roleColor(o) + '">' +
       '<div class="core-avatar"><img src="' + avatarSrc(o.avatar) + '" alt="' + attr(o.name) + '" draggable="false" />' +
         '<button class="core-remove edit-only" type="button" data-core-remove="' + attr(o.id) + '" title="移出右上角">×</button></div>' +
       '<div class="core-name">' + esc(o.name) + '</div>' +
-      '<div class="core-loadout">' +
+      '<div class="core-meta-row"><div class="core-loadout">' +
         '<span class="loadout-item" title="' + attr(skillTitle) + '"><img src="' + skillIcon(o) + '" alt="" draggable="false" /><b>' + skillNumeral(o.skillIdx) + '</b></span>' +
         moduleBadge(o) +
-      '</div>' +
+      '</div></div>' +
     '</div>';
   }
 
   function renderHeader() {
     const m = state.meta;
+    const fieldIds = new Set((state.board?.placements || []).map((p) => p.operatorId));
     const core = (state.coreOperators || [])
       .map((c) => ({ c }))
-      .filter(({ c }) => hasOperator(c.operatorId))
+      .filter(({ c }) => hasOperator(c.operatorId) && fieldIds.has(c.operatorId))
       .slice(0, 6)
       .map(({ c }) => coreCard(c))
       .join('');
@@ -797,6 +858,7 @@
         '<div class="header-rule" aria-hidden="true"></div>' +
         '<div class="header-meta">' +
           '<span class="header-ru">РЕГЛАМЕНТ</span>' +
+          (m.headerNote ? '<span class="header-note">' + esc(m.headerNote) + '</span>' : '') +
         '</div>' +
         stamp +
       '</div>' +
@@ -806,25 +868,53 @@
     '</header>';
   }
 
+  function renderBench() {
+    const ids = (state.bench || []).filter((id) => hasOperator(id)).slice(0, BENCH_SIZE);
+    const slots = [];
+    for (let i = 0; i < BENCH_SIZE; i++) {
+      const id = ids[i];
+      const o = id ? op(id) : null;
+      if (o) {
+        slots.push('<button class="bench-unit" type="button" data-bench-id="' + attr(o.id) + '" title="' + attr(o.name + ' · 备战区') + '" aria-label="' + attr(o.name) + '，备战区" style="--tier-color:' + tierColor(o) + '">' +
+          '<img src="' + avatarSrc(o.avatar) + '" alt="" draggable="false" /><span>' + (i + 1) + '</span></button>');
+      } else {
+        slots.push('<span class="bench-slot">' + (i + 1) + '</span>');
+      }
+    }
+    return '<div class="bench-strip"><span class="bench-label">备战区<br><b>' + ids.length + '/' + BENCH_SIZE + '</b></span><div class="bench-slots">' + slots.join('') + '</div></div>';
+  }
+
   function renderBoard() {
     const b = state.board || { cols: 8, rows: 4, placements: [] };
     const byCell = {};
     for (const p of (b.placements || [])) byCell[p.row + ',' + p.col] = p;
+    const gates = {};
+    const gateColTypes = {};
+    for (const g of (state.meta?.boardGates || [])) {
+      gates[g.row + ',' + g.col] = g;
+      gateColTypes[g.col] = g.type === 'blue' ? 'blue' : 'red';
+    }
     const cells = [];
     for (let r = 0; r < b.rows; r++) {
       for (let c = 0; c < b.cols; c++) {
         const p = byCell[r + ',' + c];
         const o = p ? op(p.operatorId) : null;
+        const gate = gates[r + ',' + c];
+        const gateType = gateColTypes[c];
+        const gateClass = gateType ? ' gate-col' : '';
+        const gateBlank = gateType && !gate ? ' gate-blank' : '';
+        const gateHtml = gate
+          ? '<span class="board-gate ' + attr(gateType) + '">' + (gateType === 'blue' ? '蓝门' : '红门') + '</span>'
+          : '';
         if (o) {
           const inCore = (state.coreOperators || []).some((x) => x.operatorId === o.id);
           const awaiting = pendingPlacement?.id === o.id;
-          cells.push('<div class="board-cell" data-row="' + r + '" data-col="' + c + '">' +
-            '<div class="board-unit' + (awaiting ? ' await-facing' : '') + '" data-op-id="' + attr(o.id) + '" draggable="' + (editMode && !awaiting) + '" role="button" tabindex="0" aria-label="' + attr(o.name) + '" style="--rarity:' + rarityColor(o) + ';--role:' + roleColor(o) + '">' +
+          cells.push('<div class="board-cell' + gateClass + gateBlank + '" data-row="' + r + '" data-col="' + c + '">' + gateHtml +
+            '<div class="board-unit' + (awaiting ? ' await-facing' : '') + '" data-op-id="' + attr(o.id) + '" draggable="' + (editMode && !awaiting) + '" role="button" tabindex="0" aria-label="' + attr(o.name) + '" style="--tier-color:' + tierColor(o) + ';--rarity:' + rarityColor(o) + ';--role:' + roleColor(o) + '">' +
               '<img src="' + avatarSrc(o.avatar) + '" alt="' + attr(o.name) + '" draggable="false" />' +
               '<span class="role-strip"></span>' +
               '<span class="facing-mark" data-dir="' + normalizeFacing(p.facing) + '"></span>' +
               (o.inPool === false ? '<span class="pool-warn edit-only">不在当期池</span>' : '') +
-              '<div class="board-loadout"><span class="loadout-item" title="' + attr('技能 ' + skillNumeral(o.skillIdx) + (skillOf(o) ? '：' + skillOf(o).name : '')) + '"><img src="' + skillIcon(o) + '" alt="" draggable="false" /><b>' + skillNumeral(o.skillIdx) + '</b></span>' + moduleBadge(o) + '</div>' +
               (awaiting
                 ? '<span class="facing-hint edit-only">按住拖动选方向</span>'
                 : '<button class="core-chip edit-only' + (inCore ? ' on' : '') + '" type="button" data-core-op="' + attr(o.id) + '" title="' + (inCore ? '移出右上角' : '加入右上角') + '" aria-label="' + (inCore ? '移出右上角' : '加入右上角') + '">' + (inCore ? '★' : '☆') + '</button>' +
@@ -834,15 +924,70 @@
                   '<button class="board-remove edit-only" type="button" data-board-remove="' + attr(o.id) + '" title="移出棋盘">×</button>') +
             '</div></div>');
         } else {
-          cells.push('<div class="board-cell empty" data-row="' + r + '" data-col="' + c + '"></div>');
+          cells.push('<div class="board-cell empty' + gateClass + gateBlank + '" data-row="' + r + '" data-col="' + c + '">' + gateHtml + '</div>');
         }
       }
     }
     return '<section class="panel board-panel">' +
-      '<div class="panel-head"><span class="panel-title">站位 / BOARD</span>' + (editMode ? '<span class="board-size-chip">' + b.cols + ' × ' + b.rows + '</span>' : '') + '</div>' +
+      '<div class="panel-head"><span class="panel-title">站位 / BOARD</span>' +
+        ((state.meta?.boardGates || []).length ? '<span class="panel-note board-map-hint">红门在右 · 蓝门在左下</span>' : '') +
+        (editMode ? placementChecksChip() : '') +
+        (editMode ? '<span class="board-size-chip">' + b.cols + ' × ' + b.rows + '</span>' : '') + '</div>' +
       '<div class="board-area"><div class="board-grid" id="boardGrid" style="--cols:' + b.cols + ';--rows:' + b.rows + '">' + cells.join('') + '</div></div>' +
-      '<div class="board-note"><span class="board-note-label">缺卡</span><span class="board-note-text" data-edit="meta.boardNote" data-max="46">' + esc(state.meta?.boardNote || '') + '</span></div>' +
+      (state.meta?.showBench ? renderBench() : '') +
     '</section>';
+  }
+
+  const FACE_STEP = { right: [0, 1], down: [1, 0], left: [0, -1], up: [-1, 0] };
+  function placementChecks() {
+    const checks = state.meta?.placementChecks || [];
+    if (!checks.length) return [];
+    const byOp = new Map();
+    for (const p of (state.board?.placements || [])) byOp.set(p.operatorId, p);
+    return checks.map((c) => {
+      const from = byOp.get(c.from);
+      const to = byOp.get(c.to);
+      if (!from || (c.type !== 'covers' && !to)) {
+        return { ...c, status: c.optional ? 'optional' : 'missing', ok: false };
+      }
+      let ok = false;
+      if (c.type === 'front' || c.type === 'behind') {
+        const [dr, dc] = FACE_STEP[normalizeFacing(from.facing)];
+        const sign = c.type === 'front' ? 1 : -1;
+        ok = Number(to.row) === Number(from.row) + dr * sign && Number(to.col) === Number(from.col) + dc * sign;
+      } else if (c.type === 'adjacent') {
+        ok = Math.max(Math.abs(Number(to.row) - Number(from.row)), Math.abs(Number(to.col) - Number(from.col))) === 1;
+      } else if (c.type === 'covers') {
+        const grid = op(from.operatorId)?.rangeGrid || [];
+        const targets = Array.isArray(c.targets) ? c.targets : (c.target ? [c.target] : []);
+        ok = targets.length > 0 && targets.every((target) => grid.some(([x, y]) => {
+          const [dx, dy] = rotateRangeCell(Number(x), Number(y), from.facing);
+          return Number(from.col) + dx === Number(target.col) && Number(from.row) + dy === Number(target.row);
+        }));
+      }
+      return { ...c, status: ok ? 'ok' : 'bad', ok };
+    });
+  }
+
+  function placementChecksChip() {
+    const checks = placementChecks();
+    if (!checks.length) return '';
+    const required = checks.filter((c) => !c.optional);
+    const passed = required.filter((c) => c.status === 'ok').length;
+    return '<button class="board-check-chip ' + (passed === required.length ? 'ok' : 'bad') + '" type="button" data-board-checks title="查看站位关系校验">关系 ' + passed + '/' + required.length + '</button>';
+  }
+
+  function openPlacementChecks() {
+    const checks = placementChecks();
+    const rows = checks.map((c) => {
+      const mark = c.status === 'ok' ? '✓' : (c.status === 'bad' ? '✗' : '·');
+      const cls = c.status === 'ok' ? 'ok' : (c.status === 'bad' ? 'bad' : 'optional');
+      return '<li class="placement-check ' + cls + '"><b>' + mark + '</b><span>' + esc(c.label || '') + '</span><em>' + (c.status === 'ok' ? '已满足' : c.status === 'bad' ? '未满足' : c.status === 'optional' ? '未上场' : '缺卡') + '</em></li>';
+    }).join('');
+    openModal('<div class="modal-body"><div class="detail-kicker">PLACEMENT CHECK</div><h2 class="detail-name" style="font-size:30px">站位关系校验</h2>' +
+      '<p class="detail-note">由预设声明的空间关系：身前一格 / 身后一格 / 周围八格 / 攻击范围覆盖。只校验已经上场的干员。</p>' +
+      '<ul class="placement-check-list">' + rows + '</ul>' +
+      '<div class="form-actions"><button class="btn btn-primary" type="button" data-close>知道了</button></div></div>');
   }
 
   function computeBondCounts(poster, modifiers) {
@@ -888,7 +1033,7 @@
       const lib = bond(b.id) || { name: b.id, thresholds: [] };
       const effectText = (lib.effects || []).map((e) => e.need + '：' + e.text).join('\n') || lib.summary || '';
       const cls = b.reachedTier > 0 ? ' reached' : ' unreached';
-      return '<div class="bond-row' + cls + '" data-bond-id="' + attr(b.id) + '" role="button" tabindex="0" title="' + attr(lib.name + '\n' + effectText) + '" aria-label="查看' + attr(lib.name) + '羁绊，当前 ' + b.count + ' 人">' +
+      return '<div class="bond-row' + cls + '" data-bond-id="' + attr(b.id) + '" role="button" tabindex="0" title="' + attr(lib.name + '\n' + effectText) + '" aria-label="查看' + attr(lib.name) + '盟约，当前 ' + b.count + ' 人">' +
         '<img class="bond-icon" src="' + bondIcon(b.id) + '" alt="" />' +
         '<span class="bond-name">' + esc(lib.name) + '</span>' +
         '<span class="bond-progress">' + progress(b) + '</span>' +
@@ -898,9 +1043,407 @@
     // 单列 / 双列的行内容完全一样，区别只在容器上的 .two-col
     const rows = reached.map(row).join('') + (unreached.length ? sep : '') + unreached.map(row).join('');
     return '<section class="panel bonds-panel">' +
-      '<div class="panel-head"><span class="panel-title">羁绊</span></div>' +
+      '<div class="panel-head"><span class="panel-title">盟约</span></div>' +
       '<div class="bond-list' + (twoCol ? ' two-col' : '') + '">' + rows + '</div>' +
     '</section>';
+  }
+
+  const TRAIT_PHASES = [
+    { key: 'rest-start', parent: '休整期', label: '开始', test: /进入休整期时/ },
+    { key: 'rest-end', parent: '休整期', label: '结束', test: /休整期结束时/ },
+    { key: 'battle-start', parent: '战斗', label: '开始', test: /战斗开始时/ },
+    { key: 'battle-end', parent: '战斗', label: '结束', test: /战斗结束时/ },
+    { key: 'battle', parent: '战斗', label: '进行中', test: /战斗中/ },
+    { key: 'other', parent: '其他', label: '触发 / 常驻', test: null }
+  ];
+
+  function traitPhase(text) {
+    for (const p of TRAIT_PHASES) if (p.test && p.test.test(text)) return p;
+    return TRAIT_PHASES[TRAIT_PHASES.length - 1];
+  }
+
+  function traitActiveOnBench(o) {
+    const t = String(o?.trait || '') + ' ' + String(o?.eliteTrait || '');
+    return /此干员在(整备|备战)区也生效|此干员在(整备|备战)席也生效|无论是否在场|不在场时也生效|未上场也生效/.test(t);
+  }
+
+  function traitBondIds(text) {
+    const out = [];
+    if (/盟约/.test(text)) out.push('covenant');
+    for (const m of String(text).matchAll(/【([^】]+)】/g)) {
+      const found = Object.entries(state.bondLibrary || {}).find(([, b]) => b.name === m[1]);
+      if (found && !out.includes(found[0])) out.push(found[0]);
+    }
+    return out;
+  }
+
+  function traitLabel(text) {
+    if (/叠层上限/.test(text)) return '叠层上限';
+    if (/再部署/.test(text)) return '再部署';
+    if (/攻击速度/.test(text)) return '攻速';
+    if (/攻击力/.test(text)) return '攻击力';
+    if (/技力/.test(text)) return '技力回复';
+    if (/生命上限|生命值/.test(text)) return '生命上限';
+    if (/临时层数/.test(text)) return '临时层数';
+    if (/固定层数/.test(text)) return '固定层数';
+    if (/盟约层数/.test(text)) return '盟约层数';
+    if (/【维多利亚】[\s\S]*【奥术】|【奥术】[\s\S]*【维多利亚】/.test(text)) return '奥术层数';
+    const layerBond = text.match(/【([^】]+)】[^。；]*?层数/);
+    if (layerBond) return layerBond[1].slice(0, 4) + '层数';
+    if (/层数/.test(text)) return '层数';
+    if (/购买价格|售出价格|价格/.test(text)) return '价格';
+    if (/获得/.test(text)) return '获得';
+    if (/转化/.test(text)) return '转化';
+    return '其他';
+  }
+
+  function traitCondition(text) {
+    const perLayer = text.match(/每叠加\s*(\d+)\s*层/);
+    if (perLayer) return '每' + perLayer[1] + '层';
+    const cap = text.match(/(?:每场战斗)?至多(?:叠加)?\s*(\d+)\s*层/);
+    if (/击倒|击破/.test(text)) return '击倒' + (cap ? ' / 上限' + cap[1] : '');
+    if (/开启技能时|每次开启技能/.test(text)) return '开技能' + (cap ? ' / 上限' + cap[1] : '');
+    if (/每有一名|每名/.test(text)) return /【乌萨斯】/.test(text) ? '每名乌萨斯' : '每名';
+    const count = text.match(/在场\s*(\d+)\s*名/);
+    if (count) return count[1] + '名';
+    if (/每次提升|额外\s*\+/.test(text)) return '每次提升';
+    if (/每场/.test(text)) return '每场';
+    if (/转化/.test(text)) {
+      const n = text.match(/转化\s*(\d+)\s*层/);
+      return '转化' + (n ? n[1] + '层' : '');
+    }
+    if (/首次/.test(text)) return '首次';
+    if (/刷新/.test(text)) return '刷新';
+    return '条件';
+  }
+
+  function traitUnit(text) {
+    if (/%/.test(text)) return '%';
+    if (/\/\s*秒/.test(text)) return '/秒';
+    if (/层/.test(text)) return '层';
+    if (/秒/.test(text)) return '秒';
+    return '';
+  }
+
+  function summarizeTrait(o) {
+    const raw = String(o?.trait || '').trim();
+    if (!raw) return null;
+    const phase = traitPhase(raw);
+    const brief = state.traitBrief?.[o.id];
+    if (brief) {
+      return {
+        ...brief,
+        phase,
+        label: brief.label || '其他',
+        value: brief.value ?? null,
+        unit: brief.unit || '',
+        mode: brief.mode || 'sum',
+        complex: !!brief.complex,
+        condition: brief.condition || traitCondition(raw),
+        text: raw,
+        raw
+      };
+    }
+    const text = raw
+      .replace(/^(持续叠加|单次叠加|作战能力|整备能力|特异化)\s*/, '')
+      .replace(/<[^>]+>/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    const nums = [...text.matchAll(/\+\s*(\d+(?:\.\d+)?)/g)].map((m) => Number(m[1]));
+    const label = traitLabel(text);
+    const unit = traitUnit(text);
+    // 叠层上限按 max 处理；其余带“每有 / 每名 / 击倒 / 若 / 每次”等条件的，不伪装成确定值。
+    if (label === '叠层上限' && nums.length) {
+      return { phase, label, value: nums[0], unit: unit || '%', mode: 'max', complex: false, kind: 'cap', bonds: traitBondIds(text), text, raw };
+    }
+    if (label === '价格' && nums.length === 1) {
+      return { phase, label, value: nums[0], unit: '', mode: 'sum', complex: false, kind: 'special', bonds: traitBondIds(text), text, raw };
+    }
+    const conditional = /每有|每名|每次|每场|每回合|每叠加|击倒|击破|被击倒|若|至少|至多|最高|不超过|失去|召唤|刷新|首次|触发|额外|根据/.test(text);
+    if (!conditional && nums.length === 1) {
+      return { phase, label, value: nums[0], unit, mode: 'sum', complex: false, kind: /转化/.test(text) ? 'convert' : 'stack', bonds: traitBondIds(text), text, raw };
+    }
+    return { phase, label, value: null, unit: '', mode: 'complex', complex: true, kind: 'complex', condition: traitCondition(text), bonds: traitBondIds(text), text, raw };
+  }
+
+  function traitSource(s, id, bench) {
+    return { id, name: op(id)?.name || id, bench: !!bench };
+  }
+
+  function traitGroups(board = state.board, benchIds = state.bench) {
+    const field = new Set((board?.placements || []).map((p) => p.operatorId));
+    const bench = new Set((benchIds || []).filter((id) => hasOperator(id)));
+    const ids = [...new Set([...field, ...bench])];
+    const simple = new Map();
+    const complex = [];
+    for (const id of ids) {
+      const o = op(id);
+      if (!o || !o.trait) continue;
+      const whereBench = !field.has(id);
+      if (whereBench && !traitActiveOnBench(o)) continue;
+      const s = summarizeTrait(o);
+      if (!s) continue;
+      const source = traitSource(s, id, whereBench);
+      if (s.complex) { complex.push({ ...s, sources: [source] }); continue; }
+      const key = [s.phase.key, s.label, s.unit, s.mode].join('|');
+      const g = simple.get(key) || { ...s, value: s.mode === 'max' ? -Infinity : 0, sources: [] };
+      if (s.mode === 'max') g.value = Math.max(g.value, s.value);
+      else g.value += s.value;
+      if (!g.sources.some((x) => x.id === id)) g.sources.push(source);
+      simple.set(key, g);
+    }
+    return { simple: [...simple.values()], complex };
+  }
+
+  function fmtTraitValue(v, unit) {
+    const n = Number.isInteger(v) ? String(v) : String(Math.round(v * 100) / 100);
+    return '+' + n + (unit || '');
+  }
+
+  function traitSourcesHtml(sources) {
+    const shown = sources.slice(0, 4).map((s) => '<span class="trait-src' + (s.bench ? ' bench' : '') + '" title="' + attr(s.name + (s.bench ? '（备战）' : '')) + '"><img src="' + avatarSrc(op(s.id)?.avatar) + '" alt="" />' + (s.bench ? '<i>备</i>' : '') + '</span>').join('');
+    return shown + (sources.length > 4 ? '<i class="trait-src-more">+' + (sources.length - 4) + '</i>' : '');
+  }
+
+  function renderBondChips(board = state.board) {
+    const counts = computeBondCounts(board === state.board ? state : { ...state, board });
+    const list = Object.values(counts)
+      .filter((b) => b.count > 0)
+      .sort((a, b) => (b.reachedTier - a.reachedTier) || (b.count - a.count) || String(a.id).localeCompare(String(b.id)));
+    return '<div class="trait-bond-chips">' + list.map((b) => {
+      const lib = bond(b.id) || { name: b.id, thresholds: [] };
+      return '<span class="trait-bond-chip' + (b.reachedTier > 0 ? ' on' : '') + '" title="' + attr(lib.name + ' ' + b.count + ' / ' + (b.tierThreshold ?? '—')) + '">' +
+        '<img src="' + bondIcon(b.id) + '" alt="" /><b>' + esc(lib.name) + '</b><em>' + esc(b.count) + '</em></span>';
+    }).join('') + '</div>';
+  }
+
+  function traitRecipients(s, o, board) {
+    const p = (board?.placements || []).find((x) => x.operatorId === o.id);
+    if (!p) return { ids: [], names: [] };
+    const [dr, dc] = FACE_STEP[normalizeFacing(p.facing)];
+    const cell = (row, col) => (board.placements || []).find((x) => Number(x.row) === row && Number(x.col) === col);
+    const add = (ids, x) => { if (x && !ids.includes(x.operatorId)) ids.push(x.operatorId); };
+    const ids = [];
+    const pos = s.positional || '';
+    if (pos === 'self+behind' || /自身及身后一格/.test(s.text)) {
+      add(ids, p);
+      add(ids, cell(Number(p.row) - dr, Number(p.col) - dc));
+    } else if (pos === 'self+front' || /自身及身前/.test(s.text)) {
+      add(ids, p);
+      add(ids, cell(Number(p.row) + dr, Number(p.col) + dc));
+    } else if (pos === 'front' || /身前一格/.test(s.text)) {
+      add(ids, cell(Number(p.row) + dr, Number(p.col) + dc));
+    } else if (pos === 'around' || /周围八格/.test(s.text)) {
+      for (let r = -1; r <= 1; r++) for (let c = -1; c <= 1; c++) if (r || c) add(ids, cell(Number(p.row) + r, Number(p.col) + c));
+    }
+    return { ids, names: ids.map((id) => op(id)?.name || id) };
+  }
+
+  function traitLedger(board = state.board, benchIds = state.bench) {
+    const counts = computeBondCounts({ ...state, board });
+    const field = new Set((board?.placements || []).map((p) => p.operatorId));
+    const bench = (benchIds || []).filter((id) => hasOperator(id));
+    const ids = [...new Set([...(board?.placements || []).map((p) => p.operatorId), ...bench])];
+    const activeBench = [];
+    const rows = [];
+    const unassigned = [];
+    const totals = new Map();
+    const addTotal = (bondId) => {
+      const t = totals.get(bondId) || { rest: 0, battleStart: 0, convert: 0, battle: [], stats: [], sources: [], temporary: false };
+      totals.set(bondId, t);
+      return t;
+    };
+    const apply = (bondId, s, sourceName, mult = 1) => {
+      const t = addTotal(bondId);
+      if (!t.sources.includes(sourceName)) t.sources.push(sourceName);
+      if (s.kind === 'convert') t.convert += (s.value || 0) * mult;
+      else if (s.kind === 'convertPer') t.convert += (s.value || 0) * (counts[bondId]?.count || 0);
+      else if (s.kind === 'stack') {
+        if (s.phase.key === 'battle-start') t.battleStart += (s.value || 0) * mult;
+        else if (s.phase.key === 'rest-start' || s.phase.key === 'rest-end') t.rest += (s.value || 0) * mult;
+        if (s.temporary) t.temporary = true;
+      } else if (s.kind === 'battleStack') {
+        t.battle.push({ value: s.value || 0, cap: s.cap || null, trigger: s.trigger || '触发', source: sourceName });
+      } else if (s.kind === 'stat' && s.note) {
+        if (!t.stats.includes(s.note)) t.stats.push(s.note);
+      }
+    };
+    for (const id of ids) {
+      const o = op(id);
+      if (!o || !o.trait) continue;
+      const whereBench = !field.has(id);
+      if (whereBench && !traitActiveOnBench(o)) continue;
+      if (whereBench) activeBench.push(o.name);
+      const s = summarizeTrait(o);
+      if (!s) continue;
+      const recipients = traitRecipients(s, o, board);
+      rows.push({ id, o, s, whereBench, recipients });
+      // 普通【盟约】直接归入；"盟约"按受影响干员身上的实际激活盟约拆开。
+      for (const bondId of (s.bonds || [])) {
+        if (bondId === 'covenant') continue;
+        if (!(counts[bondId]?.reachedTier > 0)) continue;
+        const mult = s.positional && recipients.ids.length > 1 ? recipients.ids.length : 1;
+        apply(bondId, s, o.name, mult);
+      }
+      if ((s.bonds || []).includes('covenant')) {
+        const targets = recipients.ids.length ? recipients.ids : [o.id];
+        for (const targetId of targets) {
+          const target = op(targetId);
+          const activeBonds = (target?.bonds || []).filter((bid) => counts[bid]?.reachedTier > 0);
+          if (!activeBonds.length) {
+            unassigned.push({ source: o.name, target: target?.name || targetId, text: s.detail || s.condition || s.label });
+            continue;
+          }
+          for (const bid of activeBonds) apply(bid, s, o.name, 1);
+        }
+      }
+    }
+    const active = Object.values(counts).filter((b) => b.count > 0 && b.reachedTier > 0);
+    const inactive = Object.values(counts).filter((b) => b.count > 0 && b.reachedTier === 0);
+    return { rows, totals, active, inactive, activeBench, unassigned };
+  }
+
+  const ACTIVE_BOND_BRIEF = {
+    ursus: '乌萨斯攻击/生命提升；击倒叠层；6 人减伤并灼烧',
+    arcane: '奥术伤害附加法术伤害；3 人后敌法抗降低、隐匿失效',
+    swift: '技能结束时按层数概率回复 12 技力'
+  };
+
+  const BOND_EFFECT_BRIEF = {
+    ursus: '攻击/生命提升；击倒叠层；6 人减伤灼烧',
+    arcane: '额外法术伤害；3 人后敌人法抗↓、隐匿失效',
+    swift: '技能结束 (20+0.35×层数)% 概率回复 12 技力',
+    precision: '精准攻击力提升；3 人后远程无视部分防御/法抗',
+    steadfast: '全队生命提升；3 人后分摊伤害',
+    victoria: '装备伤害提升；每 25 层获得维式重锤',
+    miracle: '刷新概率免费；100 层后保底当前等级',
+    doc: '范围内友方回血/元素损伤；3 人庇护',
+    indom: '地面干员击倒时概率立即再部署'
+  };
+
+  function bondTier(o) {
+    return String(o?.tier || '').replace(/阶$/, '') || '—';
+  }
+
+  function boardBondOperators(bondId, board = state.board) {
+    const out = [];
+    for (const p of board?.placements || []) {
+      const o = op(p.operatorId);
+      if (o && (o.bonds || []).includes(bondId) && !out.some((x) => x.id === o.id)) out.push(o);
+    }
+    return out;
+  }
+
+  function bondEffectText(bondId, b, active) {
+    const lib = bond(bondId) || {};
+    const brief = BOND_EFFECT_BRIEF[bondId] || lib.summary || '';
+    if (active) return brief;
+    return '需 ' + (b.nextThreshold ?? '—') + ' 人 · ' + brief;
+  }
+
+  function bondEffectTitle(bondId, b, active) {
+    const lib = bond(bondId) || {};
+    const effects = (lib.effects || []).filter((e) => /^\d+$/.test(e.need));
+    const hit = active ? effects.filter((e) => +e.need <= b.count).pop() : effects.find((e) => +e.need === b.nextThreshold);
+    return (hit?.text || lib.summary || '') + (active ? '' : '（未激活，需 ' + (b.nextThreshold ?? '—') + ' 人）');
+  }
+
+  function traitPhaseLabel(s) {
+    return s.phase.parent + ' · ' + s.phase.label;
+  }
+
+  function traitValueLine(s) {
+    if (s.detail) return s.detail;
+    if (s.complex) return s.label + ' · ' + (s.condition || '条件');
+    return s.label + ' ' + fmtTraitValue(s.value, s.unit);
+  }
+
+  function buildTraitPanels(board = state.board, benchIds = state.bench) {
+    const ledger = traitLedger(board, benchIds);
+    const sections = TRAIT_PHASES.map((phase) => ({
+      phase,
+      rows: ledger.rows.filter((r) => r.s.phase.key === phase.key)
+    })).filter((x) => x.rows.length);
+    const cols = [[], []];
+    sections.forEach((sec) => {
+      const at = sec.phase.parent === '休整期' ? 0 : 1;
+      cols[at].push(sec);
+    });
+    const opRow = (r) => '<button class="trait-op-row" type="button" data-trait-info="' + attr(r.id) + '" title="' + attr(r.o.trait) + '">' +
+      '<img src="' + avatarSrc(r.o.avatar) + '" alt="" style="--tier-color:' + tierColor(r.o) + '" />' +
+      '<b>' + esc(r.o.name) + '</b>' +
+      '<span>' + esc(traitValueLine(r.s)) + '</span>' +
+      (r.recipients.ids.length > 1 ? '<em>→ ' + esc(r.recipients.names.join(' / ')) + '</em>' : '') +
+      (r.whereBench ? '<i>备</i>' : '') + '</button>';
+    const opSection = (sec) => '<div class="trait-op-phase ' + (sec.phase.parent === '休整期' ? 'rest' : (sec.phase.parent === '战斗' ? 'battle' : 'other')) + '"><h6><b>' + esc(sec.phase.parent) + '</b><span>' + esc(sec.phase.label) + '</span></h6>' +
+      sec.rows.map(opRow).join('') + '</div>';
+    const part = (v, label) => v ? label + ' ' + v : '';
+    const bondAvatar = (o) => {
+      const tier = bondTier(o);
+      return '<span class="unit-badge-wrapper" title="' + attr(o.name + ' · 卫戍协议 ' + tier + ' 阶') + '" style="--tier-color:' + tierColor(o) + '">' +
+        '<img class="unit-avatar" src="' + avatarSrc(o.avatar) + '" alt="" />' +
+        '<i class="unit-tier-label' + (tier === '—' ? ' missing' : '') + '">' + esc(tier) + '</i></span>';
+    };
+    const bondCard = (b, active, compact = false) => {
+      const lib = bond(b.id) || { name: b.id };
+      const threshold = active ? (b.tierThreshold ?? b.count) : (b.nextThreshold ?? '—');
+      const t = ledger.totals.get(b.id) || { rest: 0, battleStart: 0, convert: 0, battle: [] };
+      const cap = t.rest + t.battleStart + t.battle.reduce((sum, x) => sum + (x.cap || 0), 0);
+      const avatars = boardBondOperators(b.id, board);
+      let effect = compact ? (ACTIVE_BOND_BRIEF[b.id] || bondEffectText(b.id, b, active)) : bondEffectText(b.id, b, active);
+      if (active && t.convert) effect = '转化 ' + t.convert + ' 层 · ' + effect;
+      const title = bondEffectTitle(b.id, b, active) + (active ? '；理论叠层 / 单回合上限 +' + cap : '') + '；参与干员：' + (avatars.map((o) => o.name + ' ' + bondTier(o) + '阶').join(' / ') || '无');
+      const capHtml = active
+        ? '<em title="理论叠层 / 单回合上限 +' + attr(cap) + '">理论 +' + esc(cap) + '</em>'
+        : '<em>未激活</em>';
+      return '<div class="trait-bond-card ' + (active ? 'on' : 'off') + (compact ? ' compact' : '') + '" title="' + attr(title) + '">' +
+        '<div class="bond-card-head"><b>【' + esc(lib.name) + '】</b><span>' + esc(b.count) + ' / ' + esc(threshold) + '</span>' +
+          capHtml + '</div>' +
+        '<div class="bond-card-effect">' + esc(effect) + '</div>' +
+        '<div class="bond-card-avs">' + avatars.map(bondAvatar).join('') + '</div>' +
+      '</div>';
+    };
+    const activeCards = ledger.active.map((b) => bondCard(b, true, true)).join('');
+    const inactiveRows = ledger.inactive.map((b) => {
+      const lib = bond(b.id) || { name: b.id };
+      const threshold = b.nextThreshold ?? '—';
+      return '<div class="trait-inactive-row" title="' + attr(bondEffectTitle(b.id, b, false)) + '">' +
+        '<div class="trait-inactive-head"><b>【' + esc(lib.name) + '】</b><span>' + esc(b.count) + ' / ' + esc(threshold) + '</span></div></div>';
+    }).join('');
+    const benchNote = ledger.activeBench.length ? ' · 备战生效：' + ledger.activeBench.join(' / ') : '';
+    const activeBlock = ledger.active.length
+      ? '<div class="trait-section-head active-head"><b>已激活盟约</b><span>理论叠层 · 单回合上限</span></div>' +
+        '<div class="trait-bond-grid active active-summary left-active">' + activeCards + '</div>'
+      : '<div class="panel-empty">暂无已激活盟约</div>';
+    const combatPanel = '<section class="panel trait-sum-panel trait-left-panel">' +
+      '<div class="panel-head"><span class="panel-title">战斗效果 / 盟约</span><span class="panel-note">' + esc(ledger.rows.length + ' 条' + benchNote) + '</span></div>' +
+      activeBlock +
+      '<div class="trait-section-head"><b>战斗效果</b></div>' +
+      (sections.length
+        ? '<div class="trait-op-columns">' + cols.map((col) => '<div class="trait-op-col">' + col.map(opSection).join('') + '</div>').join('') + '</div>'
+        : '<div class="panel-empty">场上与备战区还没有特质</div>') +
+      (inactiveRows ? '<div class="trait-section-head"><b>未激活盟约</b><span>' + ledger.inactive.length + ' 项</span></div><div class="trait-inactive-grid">' + inactiveRows + '</div>' : '') +
+      (ledger.unassigned.length ? '<div class="trait-inactive">未归属：' + esc(ledger.unassigned.map((x) => x.source + '→' + x.target + '（无已激活盟约，' + x.text + ' 不计入）').join(' · ')) + '</div>' : '') +
+    '</section>';
+    return { left: combatPanel, right: '' };
+  }
+
+  function renderTraitSummary(board = state.board, benchIds = state.bench) {
+    return buildTraitPanels(board, benchIds).left;
+  }
+
+  function openTraitInfo(id, anchor) {
+    const o = op(id);
+    if (!o || !o.trait) return;
+    const phase = traitPhase(String(o.trait));
+    const html = '<div class="info-pop-head">' +
+        '<img src="' + avatarSrc(o.avatar) + '" alt="" draggable="false" />' +
+        '<div><div class="detail-kicker">TRAIT / ' + esc(phase.parent + ' · ' + phase.label) + '</div><h3>' + esc(o.name) + '</h3>' +
+        '<div class="info-pop-meta">' + esc(String(o.trait).split('>')[0].trim()) + '</div></div>' +
+      '</div>' +
+      '<p class="strategy-effect info-pop-text">' + rich(o.trait) + '</p>';
+    if (mobileUI) openModal('<div class="modal-body">' + html + '</div>');
+    else openInfoPop(anchor || null, html);
   }
 
   function renderEquipment() {
@@ -909,9 +1452,14 @@
       const o = op(row.operatorId);
       if (!o) return '';
       const cols = ['must', 'big', 'optional'].map((slot) => {
-        const icons = (row[slot] || []).map((key, i) =>
-          '<button class="equip-icon" type="button" data-equip-icon="' + attr(key) + '" data-equip-drop="1" data-op-id="' + attr(o.id) + '" data-slot="' + slot + '" data-index="' + i + '" title="' + attr(item(key)) + '" aria-label="' + attr(item(key)) + '"><img src="' + itemSrc(key) + '" alt="" draggable="false" /></button>').join('');
-        const add = editMode && (row[slot] || []).length < 3 ? '<button class="equip-add edit-only" type="button" data-equip-add data-equip-drop="1" data-op-id="' + attr(o.id) + '" data-slot="' + slot + '" title="添加装备（也可从装备库拖入）">+</button>' : '';
+        const icons = (row[slot] || []).map((key, i) => {
+          const eff = equipmentEffect(key) || {};
+          const tip = item(key) + (eff.base ? '：' + eff.base : '');
+          return '<span class="equip-item" title="' + attr(tip) + '">' +
+            '<button class="equip-icon" type="button" data-equip-icon="' + attr(key) + '" data-equip-drop="1" data-op-id="' + attr(o.id) + '" data-slot="' + slot + '" data-index="' + i + '" title="' + attr(tip) + '" aria-label="' + attr(tip) + '"><img src="' + itemSrc(key) + '" alt="" draggable="false" /></button>' +
+            '<b>' + esc(item(key)) + '</b></span>';
+        }).join('');
+        const add = editMode && canAddEquip(row) && (row[slot] || []).length < 3 ? '<button class="equip-add edit-only" type="button" data-equip-add data-equip-drop="1" data-op-id="' + attr(o.id) + '" data-slot="' + slot + '" title="添加装备（也可从装备库拖入）">+</button>' : '';
         return '<div class="equip-col">' + icons + add + '</div>';
       }).join('');
       // 角上的按钮换的是「这一行归谁用」，不是改干员资料。
@@ -919,10 +1467,11 @@
         ? '<button class="equip-edit edit-only" type="button" data-equip-swap="' + rowIndex + '" title="更换这一行的干员" aria-label="' + attr('更换 ' + o.name) + '">⇄</button>'
         : '';
       return '<div class="equip-row">' +
-        '<div class="equip-avatar" data-op-id="' + attr(o.id) + '" role="button" tabindex="0" aria-label="查看' + attr(o.name) + '" style="--rarity:' + rarityColor(o) + '"><img src="' + avatarSrc(o.avatar) + '" alt="' + attr(o.name) + '" draggable="false" />' + editBadge + '</div>' +
+        '<div class="equip-avatar" data-op-id="' + attr(o.id) + '" role="button" tabindex="0" aria-label="查看' + attr(o.name) + '" style="--tier-color:' + tierColor(o) + '"><img src="' + avatarSrc(o.avatar) + '" alt="' + attr(o.name) + '" draggable="false" />' + editBadge + '</div>' +
         cols +
       '</div>';
     }).join('');
+    if (!rows && !editMode) return '';
     return '<section class="panel equip-panel">' +
       '<div class="panel-head"><span class="panel-title">装备</span></div>' +
       (rows ? '<div class="equip-matrix">' + head + rows + '</div>' : '<div class="panel-empty">拖入干员后自动生成装备位</div>') +
@@ -942,7 +1491,7 @@
       const remove = editMode
         ? '<button class="stage-remove edit-only" type="button" data-stage-remove="' + stageIndex + '" data-stage-slot="' + slot + '" title="从该阶段移除" aria-label="' + attr('从该阶段移除 ' + o.name) + '">×</button>'
         : '';
-      return '<span class="stage-avatar" data-stage-index="' + stageIndex + '" data-stage-kind="' + kind + '" data-stage-slot="' + slot + '" data-op-id="' + attr(o.id) + '" role="button" tabindex="0" aria-label="' + attr(o.name) + '" title="' + attr(o.name) + '" style="--rarity:' + rarityColor(o) + '"><img src="' + avatarSrc(o.avatar) + '" alt="" draggable="false" />' + remove + '</span>';
+      return '<span class="stage-avatar" data-stage-index="' + stageIndex + '" data-stage-kind="' + kind + '" data-stage-slot="' + slot + '" data-op-id="' + attr(o.id) + '" role="button" tabindex="0" aria-label="' + attr(o.name) + '" title="' + attr(o.name) + '" style="--tier-color:' + tierColor(o) + ';--rarity:' + rarityColor(o) + '"><img src="' + avatarSrc(o.avatar) + '" alt="" draggable="false" />' + remove + '</span>';
     }).join('');
     const add = editMode && (ids || []).length < 9
       ? '<button class="stage-add edit-only" type="button" data-stage-add data-stage-index="' + stageIndex + '" data-stage-kind="' + kind + '" title="添加干员">+</button>'
@@ -956,7 +1505,7 @@
       const bossCompact = s.id === 'boss' && !editMode;
       const bossTight = bossCompact && lineup.length > 8;
       const roomyNote = roomy || bossCompact;
-      const noteMax = roomyNote ? 60 : 40;
+      const noteMax = 60;
       const roomyAvatars = roomy && lineup.length <= 8;
       const fill = editMode && s.id !== 'boss'
         ? '<button class="stage-fill edit-only" type="button" data-stage-fill="' + i + '">从棋盘填入</button>' : '';
@@ -964,16 +1513,45 @@
         ? '<button class="stage-restore edit-only" type="button" data-stage-restore="' + i + '">恢复联动</button>' : '';
       const note = '<div class="stage-note' + (roomyNote ? ' boss-note roomy-note' : '') + '"><span class="stage-note-text" data-edit="stages.' + i + '.note" data-max="' + noteMax + '">' + esc(s.note || '') + '</span><span class="edit-count">' + String((s.note || '').length) + '/' + noteMax + '</span></div>';
       return '<div class="stage-block" data-stage-block="' + i + '">' +
+        (editMode ? '<button class="stage-block-remove edit-only" type="button" data-stage-remove-block="' + i + '" title="删除这个阶段">×</button>' : '') +
         '<div class="stage-head"><span class="stage-label">' + esc(s.label) + '</span></div>' +
         '<div class="stage-row' + (bossCompact ? ' boss-large' : '') + (bossTight ? ' boss-tight' : '') + (roomyAvatars ? ' roomy-row' : '') + '"><span class="stage-row-label">阵容</span><div class="stage-avatars' + (bossCompact ? ' boss-large' : '') + (bossTight ? ' boss-tight' : '') + (roomyAvatars ? ' roomy' : '') + '" data-stage-drop="' + i + '" data-stage-kind="lineup">' + stageAvatars(lineup, i, 'lineup') + '</div></div>' +
         note +
         '<div class="stage-tools">' + fill + restore + '</div>' +
       '</div>';
     }).join('');
-    return '<section class="panel stages-panel">' +
-      '<div class="panel-head"><span class="panel-title">成型节奏</span></div>' +
+    return '<section class="panel stages-panel stages-count-' + stages.length + '">' +
+      '<div class="panel-head"><span class="panel-title">成型节奏</span>' +
+        (editMode ? '<button class="stage-block-add edit-only" type="button" data-stage-add-block>+ 阶段</button>' : '') +
+      '</div>' +
       '<div class="stages-list">' + blocks + '</div>' +
     '</section>';
+  }
+
+  function addStageBlock() {
+    if (!editMode) return;
+    state.stages = state.stages || [];
+    if (state.stages.length >= 5) { toast('最多 5 个阶段', true); return; }
+    state.stages.push({
+      id: 'stage-' + Date.now(),
+      label: '阶段 ' + (state.stages.length + 1),
+      recruit: [],
+      lineupSource: 'manual',
+      lineup: [],
+      note: ''
+    });
+    saveNow();
+    renderPoster();
+    toast('已添加阶段');
+  }
+
+  function removeStageBlock(index) {
+    if (!editMode) return;
+    if (!state.stages || state.stages.length <= 1) { toast('至少保留 1 个阶段', true); return; }
+    state.stages.splice(index, 1);
+    saveNow();
+    renderPoster();
+    toast('已删除阶段');
   }
 
   function renderFooter() {
@@ -989,6 +1567,17 @@
   const strategyIcon = (s) => s?.icon ? (ASSETS[s.icon] || s.icon) : '';
   const strategyKind = (s) => s?.kind === 'both' ? '双' : (s?.kind === 'active' ? '主动' : '被动');
   const strategyById = (id) => state.strategyLibrary?.[id] || null;
+  const strategyCost = (s) => {
+    if (Number.isFinite(Number(s?.cost))) return Number(s.cost);
+    const fromData = Number(state.strategyCost?.[s?.id]);
+    if (Number.isFinite(fromData)) return fromData;
+    const m = String(s?.effect || '').match(/消耗\s*(\d+)/);
+    return m ? Number(m[1]) : 0;
+  };
+  const strategyCostHtml = (s) => {
+    const cost = strategyCost(s);
+    return cost ? '<span class="strategy-cost">消耗 ' + cost + '</span>' : '';
+  };
   const STRATEGY_EFFECT_H = 108;
   let strategyProbe = null;
   function measureStrategyText(text, width, decorated = false) {
@@ -1015,7 +1604,11 @@
     maxCharsCache.set(width, lo);
     return lo;
   }
-  const strategyWidth = (kind, altCount) => kind === 'main' ? 592 : (altCount >= 2 ? 293 : 592);
+  // 与 styles.css 的 padding 14 / 次选 gap 10 / 次选 padding 10 对应。
+  const STRATEGY_MAIN_TEXT_W = 584;
+  const STRATEGY_ALT2_TEXT_W = 265;
+  const STRATEGY_ALT1_TEXT_W = 562;
+  const strategyWidth = (kind, altCount) => kind === 'main' ? STRATEGY_MAIN_TEXT_W : (altCount >= 2 ? STRATEGY_ALT2_TEXT_W : STRATEGY_ALT1_TEXT_W);
   const strategyBrief = (id) => state.strategyBrief?.[id] || DEFAULT_DATA.strategyBrief?.[id] || '';
   function trimStrategyText(text, width) {
     let t = String(text || '').trim();
@@ -1053,7 +1646,7 @@
     const e = strategyEffectHtml(s, st, 'secondary', altsCount);
     return '<div class="strategy-secondary" data-strategy-id="' + attr(s.id) + '">' +
       '<div class="strategy-secondary-head" data-strategy-open="' + attr(s.id) + '"><img src="' + strategyIcon(s) + '" alt="" draggable="false" />' +
-        '<b title="' + attr(s.name + '：' + (s.effect || '')) + '">' + esc(s.name) + '</b><span class="strategy-kind ' + attr(s.kind) + '">' + strategyKind(s) + '</span><span class="strategy-hp">HP ' + esc(s.initialHp ?? '—') + '</span>' +
+        '<b title="' + attr(s.name + '：' + (s.effect || '')) + '">' + esc(s.name) + '</b><span class="strategy-kind ' + attr(s.kind) + '">' + strategyKind(s) + '</span><span class="strategy-hp">HP ' + esc(s.initialHp ?? '—') + '</span>' + strategyCostHtml(s) +
         (editMode ? '<button class="strategy-remove edit-only" type="button" data-strategy-remove="' + attr(s.id) + '" title="删除这个次选">×</button>' : '') +
       '</div>' +
       e.note + e.html + e.warning +
@@ -1063,6 +1656,9 @@
     const st = state.strategy || { main: '', alternatives: [], reason: '', posterText: {} };
     const main = strategyById(st.main);
     if (!main) {
+      // 只读/导出态不保留空面板：让成型节奏直接占满右栏；
+      // 编辑态保留入口，方便补选。
+      if (!editMode) return '';
       return '<section class="panel strategy-panel strategy-empty-panel">' +
         '<div class="panel-head"><span class="panel-title">盟约策略</span></div>' +
         '<button class="strategy-empty" type="button" data-strategy-edit><span>点击选择盟约策略</span><b>+</b></button>' +
@@ -1081,7 +1677,7 @@
         '<div class="strategy-main-row"><button class="strategy-icon" type="button" data-strategy-open="' + attr(main.id) + '"><img src="' + strategyIcon(main) + '" alt="" /></button>' +
           '<div class="strategy-main-body"><div class="strategy-name-row"><button class="strategy-name" type="button" data-strategy-edit title="' + attr(main.name + '：' + (main.effect || '')) + '">' + esc(main.name) + '</button>' +
             '<span class="strategy-kind ' + attr(main.kind) + '">' + strategyKind(main) + '</span>' +
-            '<span class="strategy-hp">HP ' + esc(main.initialHp ?? '—') + '</span>' + lock + '</div>' +
+            '<span class="strategy-hp">HP ' + esc(main.initialHp ?? '—') + '</span>' + strategyCostHtml(main) + lock + '</div>' +
           '</div>' +
         '</div>' +
         mainEffect.note + mainEffect.html + mainEffect.warning +
@@ -1099,7 +1695,7 @@
     const html = '<div class="info-pop-head">' +
         '<img src="' + strategyIcon(s) + '" alt="" draggable="false" />' +
         '<div><div class="detail-kicker">STRATEGY / ' + strategyKind(s) + '</div><h3>' + esc(s.name) + '</h3>' +
-        '<div class="info-pop-meta">HP ' + esc(s.initialHp ?? '—') + ' · ' + strategyKind(s) + ' · 解锁：' + esc(s.unlock || '无') + '</div></div>' +
+        '<div class="info-pop-meta">HP ' + esc(s.initialHp ?? '—') + (strategyCost(s) ? ' · 消耗 ' + strategyCost(s) : '') + ' · ' + strategyKind(s) + ' · 解锁：' + esc(s.unlock || '无') + '</div></div>' +
       '</div>' +
       '<p class="strategy-effect info-pop-text">' + rich(s.effect || '') + '</p>' +
       (s.source ? '<p class="source-note">来源：<a href="' + attr(s.source) + '" target="_blank" rel="noreferrer">' + esc(s.sourceName || '来源') + '</a></p>' : '');
@@ -1118,7 +1714,7 @@
       : (currentMain ? '当前主盟约' : '设为主盟约');
     return '<div class="strategy-picker-detail-head"><img src="' + strategyIcon(s) + '" alt="" draggable="false" />' +
         '<div><div class="detail-kicker">STRATEGY / ' + strategyKind(s) + '</div><h3>' + esc(s.name) + '</h3>' +
-        '<div class="strategy-picker-meta">HP ' + esc(s.initialHp ?? '—') + ' · ' + strategyKind(s) + (chosen ? ' · 当前已选' : '') + '</div></div>' +
+        '<div class="strategy-picker-meta">HP ' + esc(s.initialHp ?? '—') + (strategyCost(s) ? ' · 消耗 ' + strategyCost(s) : '') + ' · ' + strategyKind(s) + (chosen ? ' · 当前已选' : '') + '</div></div>' +
       '</div>' +
       '<p class="strategy-picker-unlock">' + (s.unlock ? '解锁：' + esc(s.unlock) : '解锁：无') + '</p>' +
       '<div class="strategy-picker-full"><h4>完整效果</h4><p>' + rich(s.effect || '') + '</p></div>' +
@@ -1141,7 +1737,7 @@
     return Object.values(state.strategyLibrary || {}).filter((s) => (filter === 'all' || s.kind === filter || (filter === 'active' && s.kind === 'both')) && (!query || (s.name + ' ' + s.effect).toLowerCase().includes(query)));
   }
   function strategyPickerGridHtml(items) {
-    return items.map((s) => '<button class="strategy-pick' + (s.id === strategyPickerPreview ? ' on' : '') + '" type="button" data-strategy-pick-id="' + attr(s.id) + '" title="' + attr(s.name + ' · ' + (s.unlock || '无解锁条件')) + '"><img src="' + strategyIcon(s) + '" alt="" draggable="false" /><b>' + esc(s.name) + '</b><span>' + strategyKind(s) + ' · HP ' + esc(s.initialHp ?? '—') + ' · ' + esc(s.unlock || '无解锁条件') + '</span></button>').join('') || '<div class="strategy-picker-empty">没有匹配的策略</div>';
+    return items.map((s) => '<button class="strategy-pick' + (s.id === strategyPickerPreview ? ' on' : '') + '" type="button" data-strategy-pick-id="' + attr(s.id) + '" title="' + attr(s.name + ' · ' + (s.unlock || '无解锁条件')) + '"><img src="' + strategyIcon(s) + '" alt="" draggable="false" /><b>' + esc(s.name) + '</b><span>' + strategyKind(s) + ' · HP ' + esc(s.initialHp ?? '—') + (strategyCost(s) ? ' · 消耗 ' + strategyCost(s) : '') + ' · ' + esc(s.unlock || '无解锁条件') + '</span></button>').join('') || '<div class="strategy-picker-empty">没有匹配的策略</div>';
   }
   function refreshStrategyPicker() {
     const items = strategyPickerItems();
@@ -1218,20 +1814,35 @@
   function renderPoster() {
     const poster = $('#poster');
     const strategyHtml = renderStrategy();
+    const traitPanels = state.meta?.equipmentInCore ? buildTraitPanels() : null;
+    const equipmentHtml = renderEquipment();
+    const lowerHtml = traitPanels ? traitPanels.left : renderBonds();
+    const strategyAlts = (state.strategy?.alternatives || []).filter((id) => strategyById(id));
+    const strategyLong = strategyAlts.length >= 2;
+    const soloStrategy = !!strategyHtml && (!state.strategy?.main || strategyAlts.length === 0);
     const roomyStages = !strategyHtml && !editMode;
+    const strategyCount = strategyHtml ? Math.min(2, strategyAlts.length) : 0;
+    const traitLayout = !!state.meta?.equipmentInCore;
+    const stageCount = Math.min(5, (state.stages || []).length);
     poster.innerHTML = '<div class="poster-hazard" aria-hidden="true"></div>' + renderHeader() +
       '<div class="poster-body">' +
-        '<div class="poster-left">' + renderBoard() +
-          '<div class="poster-left-bottom">' + renderBonds() + renderEquipment() + '</div>' +
+        '<div class="poster-left' + (traitLayout ? ' trait-layout' : '') + '">' + renderBoard() +
+          '<div class="poster-left-bottom' + (traitLayout ? ' trait-layout' : ' no-equipment') + '">' + lowerHtml + '</div>' +
         '</div>' +
-        '<div class="poster-right' + (strategyHtml ? ' has-strategy' : '') + '">' + renderStages(roomyStages) + strategyHtml + '</div>' +
+        '<div class="poster-right' + (strategyHtml ? ' has-strategy' : '') + (equipmentHtml ? ' has-equipment' : '') + (traitPanels?.right ? ' trait-right' : '') + ' stages-' + stageCount + (strategyLong ? ' strategy-long' : '') + (soloStrategy ? ' solo-strategy' : '') + (strategyHtml ? ' strategy-count-' + strategyCount : '') + '">' + renderStages(roomyStages) + (traitPanels?.right || '') + equipmentHtml + strategyHtml + '</div>' +
       '</div>' +
       renderFooter();
+    const rightNow = $('.poster-right');
+    const stageNow = $('.stages-panel');
+    if (rightNow && ((rightNow.scrollHeight > rightNow.clientHeight + 2) || (stageNow && stageNow.scrollHeight > stageNow.clientHeight + 2))) rightNow.classList.add('strategy-long');
     syncEditable();
     document.body.classList.toggle('has-entry', !!(state.meta.showQr && siteUrl()));
     document.body.classList.toggle('choosing-facing', !!pendingPlacement);
     if (!$('#equipmentDrawer')?.hidden) renderEquipmentLibrary();
     requestAnimationFrame(() => {
+      const rightPanel = $('.poster-right');
+      const stagePanel = $('.stages-panel');
+      if (rightPanel && ((rightPanel.scrollHeight > rightPanel.clientHeight + 2) || (stagePanel && stagePanel.scrollHeight > stagePanel.clientHeight + 2))) rightPanel.classList.add('strategy-long');
       layoutBoard();
       fitPoster();
       checkOverflow();
@@ -1257,7 +1868,7 @@
     const gap = 5;
     const w = Math.max(0, area.clientWidth - 8);
     const h = Math.max(0, area.clientHeight - 8);
-    const cell = Math.max(1, Math.floor(Math.min((w - (cols - 1) * gap) / cols, (h - (rows - 1) * gap) / rows)));
+    const cell = Math.max(1, Math.min(64, Math.floor(Math.min((w - (cols - 1) * gap) / cols, (h - (rows - 1) * gap) / rows))));
     board.style.gap = gap + 'px';
     board.style.gridTemplateColumns = 'repeat(' + cols + ', ' + cell + 'px)';
     board.style.gridTemplateRows = 'repeat(' + rows + ', ' + cell + 'px)';
@@ -1285,7 +1896,7 @@
 
   function posterCheck() {
     const overflow = [];
-    const selectors = ['.poster-header', '.poster-body', '.board-panel', '.bonds-panel', '.equip-panel', '.stages-panel', '.strategy-panel', '.poster-footer'];
+    const selectors = ['.poster-header', '.poster-body', '.board-panel', '.bonds-panel', '.equip-panel', '.trait-sum-panel', '.trait-sum-columns', '.stages-panel', '.active-bonds-panel', '.strategy-panel', '.poster-footer'];
     for (const sel of selectors) {
       const el = $(sel);
       if (!el) continue;
@@ -1296,7 +1907,7 @@
     const smallText = [];
     const leaves = $$('.poster *').filter((el) => el.children.length === 0 && el.textContent.trim());
     for (const el of leaves) {
-      if (el.closest('.edit-only, .edit-count, .prof-badge, .equip-add')) continue;
+      if (el.closest('.edit-only, .edit-count, .prof-badge, .equip-add, .core-equip-slot.add, .bond-tier, .unit-tier-label')) continue;
       const fs = parseFloat(getComputedStyle(el).fontSize || '0');
       if (fs < 20) smallText.push({ tag: el.tagName, cls: el.className, text: el.textContent.trim().slice(0, 20), fs });
     }
@@ -1306,7 +1917,7 @@
     });
     const strategyHidden = $$('[data-strategy-hidden]').filter((el) => el.dataset.strategyHidden).map((el) => ({ slot: el.dataset.strategyHidden, id: el.dataset.strategyId || '' }));
     const schema = state.schemaVersion;
-    return { schema, overflow, smallText, stageOverflow, strategyHidden, stages: state.stages?.length || 0, legacyRows: (state.legacy && state.legacy.route ? state.legacy.route.length : 0), cols: state.board?.cols, rows: state.board?.rows };
+    return { schema, overflow, smallText, stageOverflow, strategyHidden, placementChecks: placementChecks(), stages: state.stages?.length || 0, legacyRows: (state.legacy && state.legacy.route ? state.legacy.route.length : 0), cols: state.board?.cols, rows: state.board?.rows };
   }
   function checkOverflow() {
     const result = posterCheck();
@@ -1641,7 +2252,7 @@
     if (infoPop.contains(e.target)) return;
     if (infoPopAnchor && infoPopAnchor.contains(e.target)) return;
     /* 手机底部浮层是 fixed 的轻量面板：点空白只负责“关掉它”，
-       别让同一个手势继续点到底下的羁绊行 / 棋子 / 头像。
+       别让同一个手势继续点到底下的盟约行 / 棋子 / 头像。
        明确的“关闭”按钮和另一个词条链接除外：前者应该一次关掉，
        后者允许直接切换词条，不用先关再点。 */
     if (infoPop.classList.contains('sheet') &&
@@ -1683,7 +2294,7 @@
   }
 
   /* ------------------------------------------------------------
-     词条关联：正文里的【羁绊】、“装备”、特质类型变成可点词条。
+     词条关联：正文里的【盟约】、“装备”、特质类型变成可点词条。
      规则只认数据里真实存在的名字，避免把普通文本都做成链接；
      所有词条共用一个浮层，点进去是“替换”而不是层层叠加，
      最多保留 3 层历史，可「← 返回」逐层退回。
@@ -1707,7 +2318,7 @@
     const b = bond(id);
     if (!b) return '';
     return '<button type="button" class="term-link term-bond" data-term-bond="' + attr(id) + '" title="' +
-      attr('查看羁绊「' + b.name + '」：档位效果与含有的干员') + '">' +
+      attr('查看盟约「' + b.name + '」：档位效果与含有的干员') + '">' +
       '<span class="kw-name"><i>【</i>' + esc(b.name) + '<i>】</i></span></button>';
   }
   function termEquipButton(key) {
@@ -1794,7 +2405,7 @@
     const boardCount = ops.filter((o) => onBoard.has(o.id)).length;
     return '<div class="info-pop-ops">' +
       '<div class="info-pop-ops-head"><b>含有的干员</b><span>棋盘 ' + boardCount + ' · 名册 ' + ops.length + '</span></div>' +
-      (ops.length ? '<div class="info-pop-ops-grid">' + termOpsGridHtml(ops) + '</div>' : '<p class="detail-note">名册内没有该羁绊干员。</p>') +
+      (ops.length ? '<div class="info-pop-ops-grid">' + termOpsGridHtml(ops) + '</div>' : '<p class="detail-note">名册内没有该盟约干员。</p>') +
     '</div>';
   }
   function equipmentOpsSectionHtml(key) {
@@ -2035,7 +2646,7 @@
     const roleLine = o.subProfession || o.profession || '';
     const body = '<div class="modal-body" data-detail-op="' + attr(o.id) + '">' +
       '<div class="detail-hero">' +
-        '<img class="detail-avatar" src="' + avatarSrc(o.avatar) + '" alt="' + attr(o.name) + '" style="border-color:' + rarityColor(o) + '" />' +
+        '<img class="detail-avatar" src="' + avatarSrc(o.avatar) + '" alt="' + attr(o.name) + '" style="border-color:' + tierColor(o) + '" />' +
         '<div><div class="detail-kicker">OPERATOR</div>' +
           '<h2 class="detail-name">' + esc(o.name) + '</h2>' +
           '<div class="detail-subline">' +
@@ -2053,10 +2664,10 @@
         '<section class="detail-section"><h4>攻击范围</h4>' + rangeHtml(o.rangeGrid, rangeFacing, !!placed) + '</section>' +
         '<section class="detail-section"><h4>技能</h4><div class="skill-list">' + (skills || '<p class="detail-note">资料库未收录技能。</p>') + '</div></section>' +
         '<section class="detail-section"><h4>模组</h4>' + moduleHtml + '</section>' +
-        '<section class="detail-section"><h4>羁绊档位</h4>' + (bondLines || '<p class="detail-note">暂无羁绊数据。</p>') + '</section>' +
+        '<section class="detail-section"><h4>盟约档位</h4>' + (bondLines || '<p class="detail-note">暂无盟约数据。</p>') + '</section>' +
         (talents ? '<section class="detail-section"><h4>天赋</h4><div class="talent-list">' + talents + '</div></section>' : '') +
       '</div>' +
-      '<p class="detail-note">' + (mobileUI ? '数据来自本地资料库；羁绊效果见上方「羁绊档位」。' : '数据来自本地资料库；右侧抽屉可滚动查看全部。') + '</p>' +
+      '<p class="detail-note">' + (mobileUI ? '数据来自本地资料库；盟约效果见上方「盟约档位」。' : '数据来自本地资料库；右侧抽屉可滚动查看全部。') + '</p>' +
     '</div>';
     if (mobileUI) openModal(body);
     else openDetailDrawer(body);
@@ -2112,7 +2723,7 @@
     const datalist = '<datalist id="avatarKeys">' + avatarKeys.map((k) => '<option value="' + k + '">' + esc(AVATAR_LABELS[k] || k) + '</option>').join('') + '</datalist>';
     const body = '<div class="modal-body">' +
       '<div class="detail-hero" style="align-items:center">' +
-        '<img class="detail-avatar" src="' + avatarSrc(o.avatar) + '" alt="" style="border-color:' + rarityColor(o) + '" />' +
+        '<img class="detail-avatar" src="' + avatarSrc(o.avatar) + '" alt="" style="border-color:' + tierColor(o) + '" />' +
         '<div><div class="detail-kicker">EDIT / OPERATOR</div><h2 class="detail-name" style="font-size:30px">' + esc(o.name) + '</h2>' +
         '<p class="detail-note">改完保存，海报和导出图同步。</p></div>' +
       '</div>' +
@@ -2125,7 +2736,7 @@
           field('职业', 'profession', o.profession) +
           field('定位（画布内 2-4 字）', 'role', o.role) +
           '<div class="field"><label>定位色</label><select name="roleKey">' + roleOptions + '</select></div>' +
-          field('羁绊（名字或 id，逗号分隔）', 'bonds', (o.bonds || []).map((b) => bond(b)?.name || b).join(', ')) +
+          field('盟约（名字或 id，逗号分隔）', 'bonds', (o.bonds || []).map((b) => bond(b)?.name || b).join(', ')) +
           field('技能', 'skill', o.skill) +
           field('特质 / 叠层方式', 'trait', o.trait, { textarea: true, full: true, rows: 3 }) +
           field('精锐特质', 'eliteTrait', o.eliteTrait, { textarea: true, full: true, rows: 2 }) +
@@ -2395,6 +3006,35 @@
   /* ------------------------------------------------------------
      Lineup sync
      ------------------------------------------------------------ */
+  function equipCount(row) {
+    return ['must', 'big', 'optional'].reduce((n, slot) => n + (Array.isArray(row?.[slot]) ? row[slot].length : 0), 0);
+  }
+  function canAddEquip(row) {
+    return equipCount(row) < EQUIP_MAX;
+  }
+  function normalizeEquipmentRow(row) {
+    if (!row || typeof row !== 'object') return row;
+    let left = EQUIP_MAX;
+    for (const slot of ['must', 'big', 'optional']) {
+      const keys = Array.isArray(row[slot]) ? row[slot].filter(Boolean) : [];
+      row[slot] = keys.slice(0, Math.max(0, left));
+      left -= row[slot].length;
+    }
+    return row;
+  }
+  function normalizeEquipment(rows) {
+    const out = [];
+    let trimmed = false;
+    for (const row of (rows || [])) {
+      if (!row) continue;
+      const before = equipCount(row);
+      normalizeEquipmentRow(row);
+      if (equipCount(row) < before) trimmed = true;
+      out.push(row);
+    }
+    return { rows: out, trimmed };
+  }
+
   function syncLineup() {
     const placements = state.board?.placements || [];
     const placedIds = placements.map((p) => p.operatorId).filter(hasOperator);
@@ -2415,7 +3055,7 @@
       if (nextEq.length >= 3) break;
       if (!nextEq.some((r) => r.operatorId === id)) nextEq.push({ operatorId: id, must: [], big: [], optional: [] });
     }
-    state.equipment = nextEq;
+    state.equipment = nextEq.map((row) => normalizeEquipmentRow(row));
   }
 
   function toggleCore(id, refreshModal) {
@@ -2497,6 +3137,7 @@
 
   function placeRoster(id, row, col, facing = '', previewDir = '', noPending = false) {
     if (!editMode || !hasOperator(id)) return;
+    if (isGateCell(row, col)) { toast('门列不能部署干员', true); return; }
     if (pendingPlacement) cancelPendingPlacement(true);
     const before = boardSnapshot();
     const list = state.board.placements || [];
@@ -2612,7 +3253,9 @@
     const extraBonds = bonds.filter(([id]) => !isCoreBond(id));
     const triggerCounts = TRIGGER_DEFS.map((t) => ({ ...t, count: ops.filter((o) => t.re.test(operatorTraitText(o))).length })).filter((t) => t.count > 0);
     const kinds = TRAIT_KINDS.filter((k) => ops.some((o) => traitKinds(o).includes(k)));
+    const tiers = TIER_ORDER.filter((t) => ops.some((o) => operatorTier(o) === t));
     const active = [];
+    for (const t of rosterFilter.tier) active.push({ group: 'tier', value: t, label: '等阶 ' + t });
     for (const t of rosterFilter.trigger) { const def = TRIGGER_DEFS.find((x) => x.id === t); if (def) active.push({ group: 'trigger', value: t, label: def.label }); }
     for (const k of rosterFilter.kind) active.push({ group: 'kind', value: k, label: k });
     for (const id of rosterFilter.bond) active.push({ group: 'bond', value: id, label: state.bondLibrary?.[id]?.name || id });
@@ -2622,6 +3265,7 @@
         '<button class="rf-toggle" type="button" data-rf-toggle aria-expanded="' + (filtersCollapsed() ? 'false' : 'true') + '">' + (filtersCollapsed() ? '展开筛选' : '收起筛选') + '</button>' +
       '</div>' +
       '<div class="rf-body"' + (filtersCollapsed() ? ' hidden' : '') + '>' +
+      rosterFilterGroup('等阶', rosterFilterChip('tier', 'all', '全部', rosterFilter.tier.size === 0) + tiers.map((t) => rosterFilterChip('tier', t, t, rosterFilter.tier.has(t))).join('')) +
       rosterFilterGroup('特质', rosterFilterChip('kind', 'all', '全部', rosterFilter.kind.size === 0) + kinds.map((k) => rosterFilterChip('kind', k, k, rosterFilter.kind.has(k))).join('')) +
       rosterFilterGroup('触发', rosterFilterChip('trigger', 'all', '全部', rosterFilter.trigger.size === 0) + triggerCounts.map((t) => rosterFilterChip('trigger', t.id, t.label, rosterFilter.trigger.has(t.id))).join('')) +
       rosterFilterGroup('核心盟约', coreBonds.map(([id, b]) => rosterFilterChip('bond', id, b.name, rosterFilter.bond.has(id))).join('')) +
@@ -2636,14 +3280,16 @@
     const ops = Object.values(state.operators || {});
     const triggers = TRIGGER_DEFS.filter((t) => ops.some((o) => t.re.test(operatorTraitText(o))));
     const kinds = TRAIT_KINDS.filter((k) => ops.some((o) => traitKinds(o).includes(k)));
+    const tiers = TIER_ORDER.filter((t) => ops.some((o) => operatorTier(o) === t));
     const bonds = currentBondEntries();
-    return { ops, triggers, kinds, bonds };
+    return { ops, triggers, kinds, tiers, bonds };
   }
 
   function desktopSelectedOptions(choices) {
     const selected = [];
     let index = 0;
     const add = (label, test) => selected.push({ index: index++, label, test });
+    for (const t of choices.tiers) if (rosterFilter.tier.has(t)) add('等阶 ' + t, operatorTierTest(t));
     for (const t of choices.triggers) if (rosterFilter.trigger.has(t.id)) add(t.label, (o) => operatorTriggers(o).includes(t.id));
     for (const k of choices.kinds) if (rosterFilter.kind.has(k)) add(k, (o) => traitKinds(o).includes(k));
     for (const id of rosterFilter.bond) add(state.bondLibrary?.[id]?.name || id, (o) => (o.bonds || []).includes(id));
@@ -2685,7 +3331,7 @@
   }
   function rosterItemHtml(o) {
     const ordered = rosterBondList(o);
-    return '<div class="roster-item' + (selectedRosterId === o.id ? ' selected' : '') + '" draggable="true" data-roster-id="' + attr(o.id) + '" data-name="' + attr(o.name) + '" data-prof="' + attr(o.profession || '') + '" data-rarity="' + attr(String(o.rarity ?? '')) + '" data-triggers="' + attr(operatorTriggers(o).join(',')) + '" data-tier="' + esc(o.tier) + '" data-bonds="' + attr((o.bonds || []).join(',')) + '" title="拖到棋盘放置；双击查看完整详情" style="--rarity:' + rarityColor(o) + '">' +
+    return '<div class="roster-item' + (selectedRosterId === o.id ? ' selected' : '') + '" draggable="true" data-roster-id="' + attr(o.id) + '" data-name="' + attr(o.name) + '" data-prof="' + attr(o.profession || '') + '" data-rarity="' + attr(String(o.rarity ?? '')) + '" data-triggers="' + attr(operatorTriggers(o).join(',')) + '" data-tier="' + esc(o.tier) + '" data-bonds="' + attr((o.bonds || []).join(',')) + '" title="拖到棋盘放置；双击查看完整详情" style="--tier-color:' + tierColor(o) + ';--rarity:' + rarityColor(o) + '">' +
       '<img class="roster-avatar" src="' + avatarSrc(o.avatar) + '" alt="' + attr(o.name) + '" draggable="false" />' +
       '<div class="roster-main">' +
         '<div class="roster-head"><span class="roster-name">' + esc(o.name) + '</span>' +
@@ -2759,7 +3405,7 @@
     const placed = new Set((state.board?.placements || []).map((p) => p.operatorId));
     const unplaced = Object.values(state.operators || {}).filter((o) => !placed.has(o.id))
       .sort((a, b) => (Number(b.bench) - Number(a.bench)) || (tierNumber(a) - tierNumber(b)) || a.name.localeCompare(b.name, 'zh'));
-    const unplacedHtml = unplaced.length ? unplaced.map((o) => '<div class="variant-op' + (selectedRosterId === o.id ? ' selected' : '') + '" draggable="true" data-roster-id="' + attr(o.id) + '" title="' + attr(o.name) + '"><img src="' + avatarSrc(o.avatar) + '" alt="" draggable="false" style="--rarity:' + rarityColor(o) + '" /><span>' + esc(o.name) + '</span></div>').join('') : '<div class="variant-empty">所有干员都已上场</div>';
+    const unplacedHtml = unplaced.length ? unplaced.map((o) => '<div class="variant-op' + (selectedRosterId === o.id ? ' selected' : '') + '" draggable="true" data-roster-id="' + attr(o.id) + '" title="' + attr(o.name) + '"><img src="' + avatarSrc(o.avatar) + '" alt="" draggable="false" style="--tier-color:' + tierColor(o) + ';--rarity:' + rarityColor(o) + '" /><span>' + esc(o.name) + '</span></div>').join('') : '<div class="variant-empty">所有干员都已上场</div>';
     box.innerHTML =
       '<div class="variant-section"><div class="variant-title"><span>未上场干员</span><span class="count">' + unplaced.length + '</span></div><div class="variant-list">' + unplacedHtml + '</div></div>';
   }
@@ -2849,12 +3495,16 @@
     selectEquipmentDetail(key);
   }
   function assignEquipmentItem(opId, slot, index, key) {
-    if (!editMode || !ITEM_META[key] || !['must', 'big', 'optional'].includes(slot)) return;
-    const row = (state.equipment || []).find((e) => e.operatorId === opId);
-    if (!row) { toast('该干员没有装备位', true); return; }
+    if ((!editMode && !flowOpen) || !ITEM_META[key] || !['must', 'big', 'optional'].includes(slot)) return;
+    let row = (state.equipment || []).find((e) => e.operatorId === opId);
+    if (!row) {
+      row = { operatorId: opId, must: [], big: [], optional: [] };
+      state.equipment = state.equipment || [];
+      state.equipment.push(row);
+    }
     if (!Array.isArray(row[slot])) row[slot] = [];
     if (index === null || index === undefined) {
-      if (row[slot].length >= 3) { toast('单列最多 3 件装备', true); return; }
+      if (!canAddEquip(row)) { toast('每名干员最多装备 2 件', true); return; }
       if (row[slot].includes(key)) { toast('该列已经有这件装备', true); return; }
       row[slot].push(key);
     } else {
@@ -2865,6 +3515,7 @@
     saveNow();
     renderPoster();
     renderEquipmentLibrary();
+    if (flowOpen) renderFlow();
     toast('装备已更新');
   }
 
@@ -2881,7 +3532,7 @@
     const placed = new Set(boardIds);
     const btn = (o) => {
       const onRow = rows.some((r) => r.operatorId === o.id);
-      return '<button class="stage-pick' + (o.id === currentId ? ' on' : '') + '" type="button" data-equip-pick="' + attr(o.id) + '" title="' + attr(o.name + (onRow ? '（已在装备区）' : '')) + '" style="--rarity:' + rarityColor(o) + '"><img src="' + avatarSrc(o.avatar) + '" alt="" draggable="false" /><span>' + esc(o.name) + '</span></button>';
+      return '<button class="stage-pick' + (o.id === currentId ? ' on' : '') + '" type="button" data-equip-pick="' + attr(o.id) + '" title="' + attr(o.name + (onRow ? '（已在装备区）' : '')) + '" style="--tier-color:' + tierColor(o) + ';--rarity:' + rarityColor(o) + '"><img src="' + avatarSrc(o.avatar) + '" alt="" draggable="false" /><span>' + esc(o.name) + '</span></button>';
     };
     const boardHtml = boardIds.length ? boardIds.map((id) => op(id)).filter(Boolean).map(btn).join('') : '<div class="stage-pick-empty">棋盘上还没有干员</div>';
     const rest = Object.values(state.operators || {}).filter((o) => !placed.has(o.id)).sort((a, b) => a.name.localeCompare(b.name, 'zh'));
@@ -2937,7 +3588,7 @@
     const placed = new Set(boardIds);
     const cell = (o) => {
       const onRow = rows.some((r) => r.operatorId === o.id);
-      return '<button class="mr-equip-pick' + (o.id === currentId ? ' on' : '') + '" type="button" data-mr-equip-pick="' + attr(o.id) + '" style="--rarity:' + rarityColor(o) + '" aria-label="' + attr(o.name) + '">' +
+      return '<button class="mr-equip-pick' + (o.id === currentId ? ' on' : '') + '" type="button" data-mr-equip-pick="' + attr(o.id) + '" style="--tier-color:' + tierColor(o) + ';--rarity:' + rarityColor(o) + '" aria-label="' + attr(o.name) + '">' +
         '<img src="' + avatarSrc(o.avatar) + '" alt="" draggable="false" />' +
         '<span>' + esc(o.name) + '</span>' +
         (onRow ? '<i>已在装备区</i>' : '') +
@@ -3009,7 +3660,7 @@
     const boardIds = [...(state.board?.placements || [])].sort((a, b) => (a.row - b.row) || (a.col - b.col)).map((p) => p.operatorId);
     const placed = new Set(boardIds);
     const unplaced = Object.values(state.operators || {}).filter((o) => !placed.has(o.id)).sort((a, b) => (Number(b.bench) - Number(a.bench)) || a.name.localeCompare(b.name, 'zh'));
-    const btn = (o) => '<button class="stage-pick" type="button" data-stage-pick="' + attr(o.id) + '" title="' + attr(o.name) + '" style="--rarity:' + rarityColor(o) + '"><img src="' + avatarSrc(o.avatar) + '" alt="" draggable="false" /><span>' + esc(o.name) + '</span></button>';
+    const btn = (o) => '<button class="stage-pick" type="button" data-stage-pick="' + attr(o.id) + '" title="' + attr(o.name) + '" style="--tier-color:' + tierColor(o) + ';--rarity:' + rarityColor(o) + '"><img src="' + avatarSrc(o.avatar) + '" alt="" draggable="false" /><span>' + esc(o.name) + '</span></button>';
     const boardHtml = boardIds.length ? boardIds.map((id) => op(id)).filter(Boolean).map(btn).join('') : '<div class="stage-pick-empty">棋盘上还没有干员</div>';
     const unplacedHtml = unplaced.length ? unplaced.map(btn).join('') : '<div class="stage-pick-empty">所有干员都已上场</div>';
     const all = Object.values(state.operators || {}).sort((a, b) => a.name.localeCompare(b.name, 'zh'));
@@ -3097,8 +3748,16 @@
     renderItemPickerDetail();
   }
   function openItemPicker(opId, slot, index) {
-    const row = (state.equipment || []).find((e) => e.operatorId === opId);
-    if (!row) return;
+    let row = (state.equipment || []).find((e) => e.operatorId === opId);
+    if (!row) {
+      row = { operatorId: opId, must: [], big: [], optional: [] };
+      state.equipment = state.equipment || [];
+      state.equipment.push(row);
+    }
+    if ((index === null || index === undefined) && !canAddEquip(row)) {
+      toast('每名干员最多装备 2 件', true);
+      return;
+    }
     pickerCtx = { type: 'item', opId, slot, index };
     const keys = Object.keys(ITEM_META);
     itemPickerPreview = (index !== null && index !== undefined && row[slot]?.[index]) || keys[0];
@@ -3126,7 +3785,7 @@
     if (!row) return;
     if (!Array.isArray(row[pickerCtx.slot])) row[pickerCtx.slot] = [];
     if (pickerCtx.index === null || pickerCtx.index === undefined) {
-      if (row[pickerCtx.slot].length >= 3) { toast('单列最多 3 件装备', true); return; }
+      if (!canAddEquip(row)) { toast('每名干员最多装备 2 件', true); return; }
       if (row[pickerCtx.slot].includes(key)) { toast('该列已经有这件装备', true); return; }
       row[pickerCtx.slot].push(key);
     } else {
@@ -3309,6 +3968,7 @@
 
   function movePlacement(id, row, col, facing = '', previewDir = '', noPending = false) {
     if (!hasOperator(id)) return;
+    if (isGateCell(row, col)) { toast('门列不能部署干员', true); return; }
     if (pendingPlacement) cancelPendingPlacement(true);
     const before = boardSnapshot();
     const list = state.board.placements || [];
@@ -3469,6 +4129,7 @@
     for (const o of r.smallText) issues.push('小字未达标：' + (o.cls || o.tag) + ' ' + o.fs + 'px');
     for (const o of r.stageOverflow) issues.push('阶段头像溢出：第 ' + o.row + ' 行');
     for (const o of r.strategyHidden) issues.push('盟约策略：' + (o.slot === 'main' ? '主推荐' : '次选') + ' 的效果被隐藏');
+    for (const c of (r.placementChecks || [])) if (c.status === 'bad') issues.push('站位关系：' + (c.label || '未满足'));
     editMode = oldEdit;
     document.body.classList.toggle('editing', editMode);
     renderPoster();
@@ -3482,16 +4143,9 @@
       '<div class="form-actions"><button class="btn" type="button" data-export-back>返回编辑</button><button class="btn btn-primary" type="button" data-export-force>仍然导出</button></div></div>');
   }
   let lastExport = '';
-  async function exportPoster(force = false) {
-    const btn = $('#exportBtn');
-    const span = btn?.querySelector('span');
-    if (!window.htmlToImage) { toast('导出库未加载', true); return; }
-    if (!force) {
-      const issues = exportIssues();
-      if (issues.length) { showExportConfirm(issues); return; }
-    }
-    if (btn) btn.disabled = true;
-    if (span) span.textContent = '生成中…';
+  // 只生成不下载：供调试台 / headless 批量出图使用。
+  async function posterPng() {
+    if (!window.htmlToImage) throw new Error('导出库未加载');
     const poster = $('#poster');
     const oldTransform = poster.style.transform;
     const oldEdit = editMode;
@@ -3510,19 +4164,36 @@
         backgroundColor: '#0b0706'
       });
       lastExport = dataUrl;
-      downloadPoster(dataUrl);
-    } catch (e) {
-      console.error(e);
-      toast('导出失败：' + e.message, true);
+      return dataUrl;
     } finally {
       poster.style.transform = oldTransform;
       poster.classList.remove('is-exporting');
       editMode = oldEdit;
       document.body.classList.toggle('editing', editMode);
       renderPoster();
+      fitPoster();
+    }
+  }
+
+  async function exportPoster(force = false) {
+    const btn = $('#exportBtn');
+    const span = btn?.querySelector('span');
+    if (!window.htmlToImage) { toast('导出库未加载', true); return; }
+    if (!force) {
+      const issues = exportIssues();
+      if (issues.length) { showExportConfirm(issues); return; }
+    }
+    if (btn) btn.disabled = true;
+    if (span) span.textContent = '生成中…';
+    try {
+      const dataUrl = await posterPng();
+      downloadPoster(dataUrl);
+    } catch (e) {
+      console.error(e);
+      toast('导出失败：' + e.message, true);
+    } finally {
       if (btn) btn.disabled = false;
       if (span) span.textContent = '导出一图流';
-      fitPoster();
     }
   }
 
@@ -3537,7 +4208,8 @@
   }
 
   function downloadPoster(dataUrl) {
-    const name = '卫戍协议-规程-谢拉格冻结叠层-' + (state.meta.date || '2026-11-09') + '.png';
+    const safeTitle = String(state.meta.title || '一图流').replace(/[\\/:*?"<>|]/g, '-').trim() || '一图流';
+    const name = '卫戍协议-规程-' + safeTitle + '-' + (state.meta.date || '2026-11-09') + '.png';
     downloadDataUrl(dataUrl, name);
     toast('已导出 3200 × 2400 PNG' + (state.meta.showQr && !siteUrl() ? '（没设入口链接，这张不带二维码）' : ''));
   }
@@ -3737,14 +4409,27 @@
     const b = state.board || { cols: 8, rows: 4, placements: [] };
     const byCell = {};
     for (const p of (b.placements || [])) byCell[p.row + ',' + p.col] = p;
+    const gates = {};
+    const gateColTypes = {};
+    for (const g of (m.boardGates || [])) {
+      gates[g.row + ',' + g.col] = g;
+      gateColTypes[g.col] = g.type === 'blue' ? 'blue' : 'red';
+    }
     const cells = [];
     for (let r = 0; r < b.rows; r++) {
       for (let c = 0; c < b.cols; c++) {
         const p = byCell[r + ',' + c];
         const o = p ? op(p.operatorId) : null;
-        cells.push('<div class="sc-cell' + (o ? ' on' : '') + '">' +
+        const gate = gates[r + ',' + c];
+        const gateType = gateColTypes[c];
+        const gateClass = gateType ? ' sc-gate-col' : '';
+        const gateBlank = gateType && !gate ? ' sc-gate-blank' : '';
+        const gateHtml = gate
+          ? '<span class="sc-gate ' + attr(gateType) + '">' + (gateType === 'blue' ? '蓝门' : '红门') + '</span>'
+          : '';
+        cells.push('<div class="sc-cell' + (o ? ' on' : '') + gateClass + gateBlank + '">' + gateHtml +
           (o
-            ? '<img src="' + avatarSrc(o.avatar) + '" alt="" draggable="false" /><span class="sc-facing">' + facingArrow(p.facing) + '</span><span class="sc-skill">' + skillNumeral(o.skillIdx) + '</span>'
+            ? '<img src="' + avatarSrc(o.avatar) + '" alt="" draggable="false" /><span class="sc-facing">' + facingArrow(p.facing) + '</span>'
             : '') +
         '</div>');
       }
@@ -3752,8 +4437,9 @@
     const placedIds = (b.placements || []).map((p) => p.operatorId);
     const coreIds = (state.coreOperators || []).map((c) => c.operatorId).filter((id) => placedIds.includes(id));
     const ordered = [...coreIds, ...placedIds.filter((id) => !coreIds.includes(id))];
-    const lineup = ordered.map((id) => op(id)).filter(Boolean).slice(0, 8);
-    const ops = lineup.map((o) => '<div class="sc-op" style="--rarity:' + rarityColor(o) + '">' +
+    const preferred = (m.shareLineup || []).map((id) => op(id)).filter(Boolean);
+    const lineup = (preferred.length ? preferred : ordered.map((id) => op(id)).filter(Boolean)).slice(0, 9);
+    const ops = lineup.map((o) => '<div class="sc-op" style="--tier-color:' + tierColor(o) + ';--rarity:' + rarityColor(o) + '">' +
       '<img src="' + avatarSrc(o.avatar) + '" alt="" draggable="false" />' +
       '<b>' + esc(o.name) + '</b>' +
       '<span>' + skillNumeral(o.skillIdx) + (moduleOf(o) ? ' · ' + esc(moduleType(o)) : '') + '</span>' +
@@ -3762,7 +4448,7 @@
       const ids = stageIds(s).map((id) => op(id)).filter(Boolean);
       return '<div class="sc-stage"><div class="sc-stage-label">' + esc(s.label || '') + '</div>' +
         '<div class="sc-stage-body"><div class="sc-stage-ops">' +
-          ids.map((o) => '<img src="' + avatarSrc(o.avatar) + '" alt="" style="--rarity:' + rarityColor(o) + '" draggable="false" />').join('') +
+          ids.map((o) => '<img src="' + avatarSrc(o.avatar) + '" alt="" style="--tier-color:' + tierColor(o) + ';--rarity:' + rarityColor(o) + '" draggable="false" />').join('') +
         '</div>' + (s.note ? '<div class="sc-stage-note">' + esc(s.note) + '</div>' : '') + '</div></div>';
     }).join('');
     const subs = lineup.filter((o) => String(o.substitute || '').trim()).slice(0, 3)
@@ -3775,10 +4461,10 @@
         '<div class="sc-title">' + esc(m.title) + '</div>' +
         '<div class="sc-sub"><span>' + esc(m.subtitle) + '</span>' + (m.proof ? '<i>' + esc(m.proof) + '</i>' : '') + '</div>' +
       '</div>' +
-      '<section class="sc-sec"><div class="sc-sec-head"><span class="sc-sec-title">该带谁</span><span class="sc-sec-note">' + lineup.length + ' 人 · 技能 / 模组</span></div><div class="sc-lineup">' + ops + '</div></section>' +
+      '<section class="sc-sec"><div class="sc-sec-head"><span class="sc-sec-title">该带谁</span><span class="sc-sec-note">' + esc(m.shareNote || (lineup.length + ' 人 · 技能 / 模组')) + '</span></div><div class="sc-lineup count-' + lineup.length + '">' + ops + '</div></section>' +
       '<section class="sc-sec"><div class="sc-sec-head"><span class="sc-sec-title">站位</span><span class="sc-sec-note">箭头=朝向 · 敌人从右来</span></div><div class="sc-board" style="grid-template-columns:repeat(' + b.cols + ',minmax(0,1fr));grid-template-rows:repeat(' + b.rows + ',minmax(0,1fr))">' + cells.join('') + '</div></section>' +
       '<section class="sc-sec"><div class="sc-sec-head"><span class="sc-sec-title">什么时候做什么</span><span class="sc-sec-note">每阶段抓谁</span></div><div class="sc-stages">' + stages + '</div></section>' +
-      '<section class="sc-sec"><div class="sc-sec-head"><span class="sc-sec-title">缺卡怎么办</span><span class="sc-sec-note">按位替换 · 先保 3 谢</span></div><div class="sc-subs">' +
+      '<section class="sc-sec"><div class="sc-sec-head"><span class="sc-sec-title">缺卡怎么办</span><span class="sc-sec-note">' + esc(m.subsNote || '按位替换 · 先保 3 谢') + '</span></div><div class="sc-subs">' +
         (subs || '<div class="sc-sub-row" style="grid-template-columns:1fr"><span>点棋盘上的棋子可以看每位干员的替代说明。</span></div>') +
       '</div></section>' +
       '<div class="sc-foot">' +
@@ -3817,7 +4503,7 @@
       '<div class="detail-kicker">HOW TO USE</div>' +
       '<h2 class="detail-name" style="font-size:30px">三步做出你的一图流</h2>' +
       '<ol class="help-steps">' +
-        '<li><b>抄</b><span>当前是谢拉格 8 人示例。点任意头像看数值 / 技能 / 模组；点棋盘上的棋子看详情，里面有「替补 / 没有怎么办」的缺卡替代。</span></li>' +
+        '<li><b>抄</b><span>当前是示例阵容（顶栏可切换谢拉格 / 乌萨斯）。点任意头像看数值 / 技能 / 模组；点棋盘上的棋子看详情，里面有「替补 / 没有怎么办」的缺卡替代。</span></li>' +
         '<li><b>改</b><span>点右上角「编辑」：直接改字、拖棋子摆站位、点装备 / 盟约替换。改动自动存在本机，改错了按 Ctrl+Z（或编辑栏的撤销箭头）退回去；新建或导入前会先写自动备份。</span></li>' +
         '<li><b>发</b><span>「导出一图流」出 3200×2400 PNG；「分享」出阵容链接、二维码和竖版长图。别人打开链接看到的就是你这一版。</span></li>' +
       '</ol>' +
@@ -3826,6 +4512,7 @@
       '<div class="form-actions" style="justify-content:flex-start;flex-wrap:wrap;margin-top:16px">' +
         '<button class="btn btn-primary" type="button" data-help-template>用空白模板开始</button>' +
         '<button class="btn" type="button" data-help-share>分享当前阵容</button>' +
+        '<a class="btn" href="' + attr(PRESET ? location.href.split('?')[0].split('#')[0] : '?preset=ursus') + '">' + esc(PRESET === 'ursus' ? '谢拉格示例' : '乌萨斯示例') + '</a>' +
         '<button class="btn" type="button" data-help-close>知道了</button>' +
       '</div>' +
     '</div>', true);
@@ -4043,11 +4730,11 @@
   }
 
   function resetMobileFilter() {
-    mobileFilter = { trigger: new Set(), kind: new Set(), bond: new Set() };
+    mobileFilter = { tier: new Set(), trigger: new Set(), kind: new Set(), bond: new Set() };
   }
 
   function mobileFilterCount() {
-    return mobileFilter.trigger.size + mobileFilter.kind.size + mobileFilter.bond.size;
+    return mobileFilter.tier.size + mobileFilter.trigger.size + mobileFilter.kind.size + mobileFilter.bond.size;
   }
 
   function updateMobileFilterLabel() {
@@ -4062,14 +4749,16 @@
     const ops = Object.values(state.operators || {});
     const triggers = TRIGGER_DEFS.filter((t) => ops.some((o) => t.re.test(operatorTraitText(o))));
     const kinds = TRAIT_KINDS.filter((k) => ops.some((o) => traitKinds(o).includes(k)));
+    const tiers = TIER_ORDER.filter((t) => ops.some((o) => operatorTier(o) === t));
     const bondEntries = currentBondEntries();
-    return { ops, triggers, kinds, bondEntries };
+    return { ops, triggers, kinds, tiers, bondEntries };
   }
 
   function mobileSelectedOptions(choices) {
     const selected = [];
     let index = 0;
     const add = (label, test) => selected.push({ index: index++, label, test });
+    for (const t of choices.tiers) if (mobileFilter.tier.has(t)) add('等阶 ' + t, operatorTierTest(t));
     for (const t of choices.triggers) if (mobileFilter.trigger.has(t.id)) add(t.label, (o) => operatorTriggers(o).includes(t.id));
     for (const k of choices.kinds) if (mobileFilter.kind.has(k)) add(k, (o) => traitKinds(o).includes(k));
     for (const [id, b] of choices.bondEntries) if (mobileFilter.bond.has(id)) add(b.name, (o) => (o.bonds || []).includes(id));
@@ -4081,7 +4770,7 @@
     return '<button class="mr-sheet-op' + (selectedRosterId === o.id ? ' on' : '') + (placed.has(o.id) ? ' placed' : '') +
       '" type="button" data-mr-op-id="' + attr(o.id) + '" data-name="' + attr(o.name) + '" data-prof="' + attr(o.profession || '') +
       '" data-rarity="' + attr(String(o.rarity ?? '')) + '" data-triggers="' + attr(operatorTriggers(o).join(',')) +
-      '" data-bonds="' + attr((o.bonds || []).join(',')) + '" style="--rarity:' + rarityColor(o) + '" title="' + attr(o.name + (placed.has(o.id) ? '（已在场上）' : '') + '；点开看详情 / 放置') + '">' +
+      '" data-bonds="' + attr((o.bonds || []).join(',')) + '" style="--tier-color:' + tierColor(o) + ';--rarity:' + rarityColor(o) + '" title="' + attr(o.name + (placed.has(o.id) ? '（已在场上）' : '') + '；点开看详情 / 放置') + '">' +
       '<img src="' + avatarSrc(o.avatar) + '" alt="" draggable="false" />' +
       '<span class="mr-op-body">' +
         '<span class="mr-op-head">' +
@@ -4119,6 +4808,7 @@
     const summary = $('#mrFilterSummary');
     if (summary) {
       const parts = [];
+      if (mobileFilter.tier.size) parts.push('等阶 ' + [...mobileFilter.tier].join('/'));
       if (mobileFilter.trigger.size) parts.push('触发 ' + choices.triggers.filter((t) => mobileFilter.trigger.has(t.id)).map((t) => t.label).join('/'));
       if (mobileFilter.kind.size) parts.push('特质 ' + choices.kinds.filter((k) => mobileFilter.kind.has(k)).join('/'));
       if (mobileFilter.bond.size) parts.push('盟约 ' + choices.bondEntries.filter(([id]) => mobileFilter.bond.has(id)).map(([, b]) => b.name).join('/'));
@@ -4133,7 +4823,7 @@
   }
 
   function mobileRosterSheetHtml() {
-    const { ops, triggers, kinds, bondEntries } = mobileFilterChoices();
+    const { ops, triggers, kinds, tiers, bondEntries } = mobileFilterChoices();
     const chip = (group, value, label, on) =>
       '<button class="mr-fchip' + (on ? ' on' : '') + '" type="button" data-mrf-group="' + group + '" data-mrf-value="' + attr(value) + '">' + esc(label) + '</button>';
     const groupHtml = (label, group, items, allOn, itemOn, withAll = true) =>
@@ -4146,6 +4836,7 @@
     const filterCount = mobileFilterCount();
     const filters = mobileFilterOpen
       ? '<div class="mr-filters">' +
+          groupHtml('等阶', 'tier', tiers.map((t) => [t, t]), mobileFilter.tier.size === 0, (v) => mobileFilter.tier.has(v)) +
           groupHtml('特质', 'kind', kinds.map((k) => [k, k]), mobileFilter.kind.size === 0, (v) => mobileFilter.kind.has(v)) +
           groupHtml('触发', 'trigger', triggers.map((t) => [t.id, t.label]), mobileFilter.trigger.size === 0, (v) => mobileFilter.trigger.has(v)) +
           groupHtml('核心盟约', 'bond', coreBonds.map(([id, b]) => [id, b.name]), mobileFilter.bond.size === 0, (v) => mobileFilter.bond.has(v), false) +
@@ -4175,13 +4866,13 @@
     const ops = bondOperators(id);
     const onBoard = new Set((state.board?.placements || []).map((p) => p.operatorId));
     const avatars = ops.map((o) =>
-      '<button class="mr-bond-op' + (onBoard.has(o.id) ? ' on-board' : '') + '" type="button" data-op-id="' + attr(o.id) + '" title="' + attr(o.name + (onBoard.has(o.id) ? '（棋盘上）' : '')) + '" aria-label="' + attr('查看 ' + o.name) + '" style="--rarity:' + rarityColor(o) + '">' +
+      '<button class="mr-bond-op' + (onBoard.has(o.id) ? ' on-board' : '') + '" type="button" data-op-id="' + attr(o.id) + '" title="' + attr(o.name + (onBoard.has(o.id) ? '（棋盘上）' : '')) + '" aria-label="' + attr('查看 ' + o.name) + '" style="--tier-color:' + tierColor(o) + ';--rarity:' + rarityColor(o) + '">' +
         '<img src="' + avatarSrc(o.avatar) + '" alt="' + attr(o.name) + '" draggable="false" />' +
       '</button>').join('');
     return '<div class="mr-bond-detail">' +
       (b.summary ? '<p>' + linkedRich(b.summary) + '</p>' : '') +
-      '<div class="mr-bond-ops-wrap"><span class="mr-bond-ops-label">含有的干员 · 棋盘 ' + ops.filter((o) => onBoard.has(o.id)).length + ' / 名册 ' + ops.length + '</span>' +
-        '<div class="mr-bond-ops">' + (avatars || '<span class="mr-note">名册内没有该羁绊干员</span>') + '</div>' +
+      '<div class="mr-bond-ops-wrap"><span class="mr-bond-ops-label">含有的干员 · 棋盘 ' + ops.filter((o) => onBoard.has(o.id)).length + ' / 名册 ' + ops.length + ' · 灰色 = 未上场</span>' +
+        '<div class="mr-bond-ops">' + (avatars || '<span class="mr-note">名册内没有该盟约干员</span>') + '</div>' +
       '</div>' +
       (effects || '<p class="mr-note">暂无档位数据。</p>') +
       (b.play ? '<p class="mr-bond-play"><b>本套怎么用</b>' + linkedRich(b.play) + '</p>' : '') +
@@ -4226,13 +4917,13 @@
           (sk ? ' · 技能 ' + skillNumeral(o.skillIdx) + ' ' + esc(sk.name) : '') + '</span></div>' +
         '<button class="mr-piece-close" type="button" data-mr-piece-close>收起</button>' +
       '</div>' +
-      // 动作条放头部下方：面板很长，放底部要滚过羁绊/特性/技能才够得着
+      // 动作条放头部下方：面板很长，放底部要滚过盟约/特性/技能才够得着
       '<div class="mr-piece-actions">' +
         '<button class="mr-action" type="button" data-op-id="' + attr(o.id) + '">完整详情</button>' +
         '<button class="mr-action danger" type="button" data-mr-remove="' + attr(o.id) + '">移出棋盘</button>' +
       '</div>' +
-      '<div class="mr-piece-sub">羁绊</div>' +
-      '<div class="mr-piece-bonds">' + (bondRows || '<p class="mr-note">该干员没有羁绊数据。</p>') + '</div>' +
+      '<div class="mr-piece-sub">盟约</div>' +
+      '<div class="mr-piece-bonds">' + (bondRows || '<p class="mr-note">该干员没有盟约数据。</p>') + '</div>' +
       '<div class="mr-piece-sub">特性</div>' +
       '<div class="mr-piece-text">' +
         (o.trait ? '<p><b>基础</b>' + linkedRich(o.trait) + '</p>' : '') +
@@ -4367,6 +5058,12 @@
     const rows = Math.max(1, Number(b.rows) || 4);
     const byCell = {};
     for (const p of (b.placements || [])) byCell[p.row + ',' + p.col] = p;
+    const gates = {};
+    const gateColTypes = {};
+    for (const g of (m.boardGates || [])) {
+      gates[g.row + ',' + g.col] = g;
+      gateColTypes[g.col] = g.type === 'blue' ? 'blue' : 'red';
+    }
 
     /* 1. title */
     const proof = String(m.proof || '').trim();
@@ -4382,7 +5079,7 @@
     const coreHtml = core.length ? core.map((o) => {
       const sk = skillOf(o);
       const icon = skillIcon(o);
-      return '<button class="mr-core" type="button" data-op-id="' + attr(o.id) + '" style="--rarity:' + rarityColor(o) + ';--role:' + roleColor(o) + '" aria-label="' + attr('查看 ' + o.name + ' 详情') + '">' +
+      return '<button class="mr-core" type="button" data-op-id="' + attr(o.id) + '" style="--tier-color:' + tierColor(o) + ';--rarity:' + rarityColor(o) + ';--role:' + roleColor(o) + '" aria-label="' + attr('查看 ' + o.name + ' 详情') + '">' +
         '<span class="mr-core-avatar"><img src="' + avatarSrc(o.avatar) + '" alt="' + attr(o.name) + '" draggable="false" /></span>' +
         '<span class="mr-core-name">' + esc(o.name) + '</span>' +
         '<span class="mr-core-meta">' +
@@ -4401,36 +5098,47 @@
       for (let c = 0; c < cols; c++) {
         const p = byCell[r + ',' + c];
         const o = p ? op(p.operatorId) : null;
+        const gate = gates[r + ',' + c];
+        const gateType = gateColTypes[c];
+        const gateClass = gateType ? ' mr-gate-col' : '';
+        const gateBlank = gateType && !gate ? ' mr-gate-blank' : '';
+        const gateHtml = gate
+          ? '<span class="mr-gate ' + attr(gateType) + '">' + (gateType === 'blue' ? '蓝门' : '红门') + '</span>'
+          : '';
         if (o) {
           const dir = normalizeFacing(p.facing);
           // 移除按钮不再放进格子：46px 格子里 20px 的 × 贴着中心点，
           // 手指点「棋子中心换朝向」会被触摸补偿判成删除。改到下方信息面板。
-          cells.push('<div class="mr-cell on" role="button" tabindex="0" data-op-id="' + attr(o.id) + '" data-row="' + r + '" data-col="' + c + '" style="--rarity:' + rarityColor(o) + '" aria-label="' + attr(o.name + '，朝向' + FACING_LABEL[dir] + '，技能 ' + skillNumeral(o.skillIdx)) + '">' +
+          cells.push('<div class="mr-cell on' + gateClass + gateBlank + '" role="button" tabindex="0" data-op-id="' + attr(o.id) + '" data-row="' + r + '" data-col="' + c + '" style="--tier-color:' + tierColor(o) + ';--rarity:' + rarityColor(o) + '" aria-label="' + attr(o.name + '，朝向' + FACING_LABEL[dir] + '，技能 ' + skillNumeral(o.skillIdx)) + '">' + gateHtml +
             '<img src="' + avatarSrc(o.avatar) + '" alt="' + attr(o.name) + '" draggable="false" />' +
             '<span class="mr-facing" aria-hidden="true">' + facingArrow(dir) + '</span>' +
-            '<span class="mr-cell-skill" aria-hidden="true">' + skillNumeral(o.skillIdx) + '</span>' +
           '</div>');
         } else {
           const placeable = editing && selectedRosterId ? ' mr-placeable' : '';
           const role = editing
             ? ' role="button" tabindex="0" aria-label="' + attr(selectedRosterId ? '放置干员' : '空格，点其他位置取消范围') + '"'
             : ' aria-hidden="true"';
-          cells.push('<div class="mr-cell empty' + placeable + '" data-row="' + r + '" data-col="' + c + '"' + role + '></div>');
+          cells.push('<div class="mr-cell empty' + placeable + gateClass + gateBlank + '" data-row="' + r + '" data-col="' + c + '"' + role + '>' + gateHtml + '</div>');
         }
       }
     }
-    const boardNote = String(state.meta?.boardNote || '').trim();
-    const boardNoteHtml = (boardNote || editing)
-      ? '<div class="mr-board-note"><span class="mr-board-note-label">缺卡</span><span class="mr-board-note-text"' +
-          (editing ? mobileEditAttrs('meta.boardNote', 46, '填写缺卡说明') : '') + '>' + esc(boardNote) + '</span></div>'
+    const benchIds = (state.bench || []).filter((id) => hasOperator(id)).slice(0, BENCH_SIZE);
+    const benchHtml = m.showBench
+      ? '<div class="mr-bench"><span class="mr-bench-label">备战区 ' + benchIds.length + '/' + BENCH_SIZE + '</span><div class="mr-bench-slots">' +
+        Array.from({ length: BENCH_SIZE }, (_, i) => {
+          const o = benchIds[i] ? op(benchIds[i]) : null;
+          return o
+            ? '<span class="mr-bench-unit" style="--tier-color:' + tierColor(o) + ';--rarity:' + rarityColor(o) + '"><img src="' + avatarSrc(o.avatar) + '" alt="' + attr(o.name) + '" draggable="false" /></span>'
+            : '<span class="mr-bench-slot"></span>';
+        }).join('') + '</div></div>'
       : '';
     const boardHtml = '<section class="mr-section mr-board-section">' +
       '<div class="mr-sec-head"><h2 class="mr-sec-title">站位</h2><span class="mr-sec-note">' + cols + ' × ' + rows + ' · 箭头=朝向</span></div>' +
-      '<p class="mr-note">' + (editing ? '点「选人」看详情 → 点「放置到棋盘」→ 点空格；点棋子先看范围/羁绊/特性/技能，再点换朝向；拖棋子换位；移出棋盘在下方信息面板；点虚线文字可改。' : '点棋子看详情；本页只读，点「编辑」可摆站位。敌人从右来。') + '</p>' +
+      '<p class="mr-note">' + (editing ? '点「选人」看详情 → 点「放置到棋盘」→ 点空格；点棋子先看范围/盟约/特性/技能，再点换朝向；拖棋子换位；移出棋盘在下方信息面板；点虚线文字可改。' : '点棋子看详情；本页只读，点「编辑」可摆站位。敌人从右来。') + '</p>' +
       '<div class="mr-board-wrap"><div class="mr-board" style="--cols:' + cols + '">' + cells.join('') + '</div></div>' +
+      benchHtml +
       '<p class="mr-range-note" id="mrRangeNote" hidden></p>' +
       mobilePieceInfoHtml() +
-      boardNoteHtml +
     '</section>';
 
     /* 4. stages */
@@ -4445,7 +5153,7 @@
       const opsHtml = ids.length
         ? '<div class="mr-stage-ops">' + ids.map((o, slot) =>
             '<div class="mr-stage-op-wrap">' +
-              '<button class="mr-stage-op" type="button" data-op-id="' + attr(o.id) + '" data-mr-stage-index="' + i + '" data-mr-stage-slot="' + slot + '" style="--rarity:' + rarityColor(o) + '" aria-label="' + attr(editing ? '替换 ' + o.name : '查看 ' + o.name + ' 详情') + '"><img src="' + avatarSrc(o.avatar) + '" alt="' + attr(o.name) + '" draggable="false" /></button>' +
+              '<button class="mr-stage-op" type="button" data-op-id="' + attr(o.id) + '" data-mr-stage-index="' + i + '" data-mr-stage-slot="' + slot + '" style="--tier-color:' + tierColor(o) + ';--rarity:' + rarityColor(o) + '" aria-label="' + attr(editing ? '替换 ' + o.name : '查看 ' + o.name + ' 详情') + '"><img src="' + avatarSrc(o.avatar) + '" alt="' + attr(o.name) + '" draggable="false" /></button>' +
               (editing ? '<button class="mr-stage-remove" type="button" data-mr-stage-remove="' + i + '" data-mr-stage-slot="' + slot + '" aria-label="从阶段移除 ' + attr(o.name) + '">×</button>' : '') +
             '</div>').join('') + addHtml + '</div>'
         : (editing ? '<div class="mr-stage-ops">' + addHtml + '</div>' : '<p class="mr-empty">这一阶段还没有阵容。</p>');
@@ -4468,7 +5176,7 @@
       const on = bd.reachedTier > 0;
       const open = mobileBondOpen === bd.id;
       return '<div class="mr-bond-wrap">' +
-        '<button class="mr-bond' + (on ? ' on' : ' off') + '" type="button" data-bond-id="' + attr(bd.id) + '" aria-expanded="' + open + '" aria-label="' + attr('查看 ' + lib.name + ' 羁绊，当前 ' + bd.count + ' 人') + '">' +
+        '<button class="mr-bond' + (on ? ' on' : ' off') + '" type="button" data-bond-id="' + attr(bd.id) + '" aria-expanded="' + open + '" aria-label="' + attr('查看 ' + lib.name + ' 盟约，当前 ' + bd.count + ' 人') + '">' +
           '<img src="' + bondIcon(bd.id) + '" alt="" draggable="false" />' +
           '<span class="mr-bond-name">' + esc(lib.name) + '</span>' +
           '<span class="mr-bond-count">' + esc(bd.count) + ' / ' + esc(bd.tierThreshold ?? '—') + '</span>' +
@@ -4476,10 +5184,10 @@
         '</button>' +
         (open ? mobileBondDetailHtml(bd.id, lib) : '') +
       '</div>';
-    }).join('') : '<p class="mr-empty">棋盘上还没有干员，羁绊未统计。</p>';
+    }).join('') : '<p class="mr-empty">棋盘上还没有干员，盟约未统计。</p>';
     const bondOn = bondList.filter((x) => x.reachedTier > 0).length;
     const bondSection = '<section class="mr-section">' +
-      '<div class="mr-sec-head"><h2 class="mr-sec-title">羁绊</h2><span class="mr-sec-note">' + (bondList.length ? bondOn + ' 已激活 / ' + bondList.length : '暂无') + '</span></div>' +
+      '<div class="mr-sec-head"><h2 class="mr-sec-title">盟约</h2><span class="mr-sec-note">' + (bondList.length ? bondOn + ' 已激活 / ' + bondList.length : '暂无') + '</span></div>' +
       '<div class="mr-bonds">' + bondHtml + '</div>' +
     '</section>';
 
@@ -4492,7 +5200,7 @@
         const keys = row[slot] || [];
         const icons = keys.map((key, i) =>
           '<button class="mr-equip-icon" type="button" data-mr-equip="' + attr(key) + '" data-op-id="' + attr(o.id) + '" data-slot="' + slot + '" data-index="' + i + '" title="' + attr(item(key)) + '" aria-label="' + attr(item(key) + '，查看装备效果') + '"><img src="' + itemSrc(key) + '" alt="" draggable="false" /></button>').join('');
-        const add = editing && keys.length < 3
+        const add = editing && canAddEquip(row) && keys.length < 3
           ? '<button class="mr-equip-icon mr-equip-add" type="button" data-mr-equip-add data-op-id="' + attr(o.id) + '" data-slot="' + slot + '" aria-label="添加装备">+</button>'
           : '';
         return '<div class="mr-equip-col"><span class="mr-equip-label">' + ({ must: '必做', big: '大提升', optional: '可选' }[slot]) + '</span>' +
@@ -4504,7 +5212,7 @@
         : '';
       return '<div class="mr-equip-row">' +
         '<div class="mr-equip-op-wrap">' +
-          '<button class="mr-equip-op" type="button" data-op-id="' + attr(o.id) + '" style="--rarity:' + rarityColor(o) + '" aria-label="' + attr('查看 ' + o.name + ' 详情') + '">' +
+          '<button class="mr-equip-op" type="button" data-op-id="' + attr(o.id) + '" style="--tier-color:' + tierColor(o) + ';--rarity:' + rarityColor(o) + '" aria-label="' + attr('查看 ' + o.name + ' 详情') + '">' +
             '<img src="' + avatarSrc(o.avatar) + '" alt="' + attr(o.name) + '" draggable="false" />' +
             '<span>' + esc(o.name) + '</span>' +
           '</button>' + swapBtn +
@@ -4528,6 +5236,7 @@
         '<span class="mr-strategy-name">' + esc(s.name) + '</span>' +
         '<span class="mr-kind ' + attr(s.kind || '') + '">' + strategyKind(s) + '</span>' +
         '<span class="mr-hp">HP ' + esc(s.initialHp ?? '—') + '</span>' +
+        (strategyCost(s) ? '<span class="mr-cost">消耗 ' + strategyCost(s) + '</span>' : '') +
       '</button>' +
       '<p class="mr-effect">' + rich(s.effect || '') + '</p>' +
       (editing ? '<div class="mr-strategy-actions">' +
@@ -4584,7 +5293,7 @@
       '</div>' +
     '</header>';
     const editHint = editing
-      ? '<div class="mr-edit-hint"><b>手机编辑</b><span>点「选人」看详情 → 点「放置到棋盘」→ 点空格；点棋子先看范围/羁绊/特性/技能，再点换朝向（选中后有 × 移除）；拖棋子换位；点虚线文字可改。</span></div>'
+      ? '<div class="mr-edit-hint"><b>手机编辑</b><span>点「选人」看详情 → 点「放置到棋盘」→ 点空格；点棋子先看范围/盟约/特性/技能，再点换朝向（选中后有 × 移除）；拖棋子换位；点虚线文字可改。</span></div>'
       : '';
     const dockHtml = editing
       ? '<nav class="mr-dock" aria-label="手机编辑操作">' +
@@ -4613,6 +5322,580 @@
     filterMobileRoster();
     box.scrollTop = keepTop;
   };
+
+  /* ------------------------------------------------------------
+     Flow mode: 选人 → 站位（含备战） → 节奏 → 核心/装备 → 盟约
+     ------------------------------------------------------------ */
+  const FLOW_STEPS = ['选人', '站位', '节奏', '核心 / 装备', '盟约'];
+  const flowUnique = (ids) => [...new Set((ids || []).filter((id) => hasOperator(id)))];
+
+  function flowPendingStageIds(index = null) {
+    const current = index === null ? new Set() : new Set((flowStages?.[index]?.lineup) || []);
+    return flowPicked.filter((id) => !current.has(id));
+  }
+
+  function flowOpenMode() {
+    if (flowOpen) return;
+    flowSnapshot = {
+      board: clone(state.board),
+      bench: clone(state.bench || []),
+      core: clone(state.coreOperators || []),
+      equipment: clone(state.equipment || []),
+      stages: clone(state.stages || []),
+      strategy: clone(state.strategy || {}),
+      meta: { showBench: !!state.meta.showBench, equipmentInCore: !!state.meta.equipmentInCore }
+    };
+    flowPicked = flowUnique([
+      ...(state.board?.placements || []).map((p) => p.operatorId),
+      ...(state.bench || [])
+    ]);
+    flowBoard = clone(state.board || { cols: 9, rows: 4, placements: [] });
+    flowBench = clone((state.bench || []).slice(0, BENCH_SIZE));
+    // 流程模式从“选人池”重新排节奏：默认所有已选干员都在待放入池，
+    // 阶段阵容清空（标签/备注保留），避免一进来就被旧阶段锁死。
+    flowStages = clone(state.stages || []).map((s) => ({ ...s, lineup: [] }));
+    if (!flowStages.length) {
+      flowStages = [
+        { id: 'open', label: '起手', lineupSource: 'manual', lineup: [], note: '' },
+        { id: 'mid', label: '中期', lineupSource: 'manual', lineup: [], note: '' },
+        { id: 'end', label: '大成', lineupSource: 'manual', lineup: [], note: '' }
+      ];
+    }
+    flowStep = 0;
+    flowSelected = '';
+    flowQuery = '';
+    flowBond = 'all';
+    flowKind = 'all';
+    flowTrigger = 'all';
+    flowTier = 'all';
+    flowDetailId = '';
+    flowStrategyQuery = '';
+    flowDrag = null;
+    state.meta.showBench = true;
+    state.meta.equipmentInCore = true;
+    flowOpen = true;
+    document.body.classList.add('flow-open');
+    $('#flowMode').hidden = false;
+    renderFlow();
+  }
+
+  function flowClose(commit) {
+    if (!flowOpen) return;
+    if (commit) {
+      state.board = clone(flowBoard);
+      state.bench = clone(flowBench).slice(0, BENCH_SIZE);
+      state.stages = clone(flowStages);
+      state.meta.showBench = true;
+      state.meta.equipmentInCore = true;
+      const field = new Set((state.board.placements || []).map((p) => p.operatorId));
+      state.coreOperators = (state.coreOperators || []).filter((c) => field.has(c.operatorId)).slice(0, 6);
+      saveNow();
+    } else if (flowSnapshot) {
+      state.board = clone(flowSnapshot.board);
+      state.bench = clone(flowSnapshot.bench);
+      state.coreOperators = clone(flowSnapshot.core);
+      state.equipment = clone(flowSnapshot.equipment);
+      state.stages = clone(flowSnapshot.stages);
+      state.strategy = clone(flowSnapshot.strategy);
+      state.meta.showBench = flowSnapshot.meta.showBench;
+      state.meta.equipmentInCore = flowSnapshot.meta.equipmentInCore;
+      saveNow();
+    }
+    flowOpen = false;
+    flowSnapshot = null;
+    flowSelected = '';
+    document.body.classList.remove('flow-open');
+    $('#flowMode').hidden = true;
+    $('#flowMode').innerHTML = '';
+    renderPoster();
+  }
+
+  function flowMoveField(id, row, col) {
+    if (isGateCell(row, col)) { toast('门列不能部署干员', true); return; }
+    const maxField = 10;
+    const existing = (flowBoard.placements || []).find((p) => Number(p.row) === Number(row) && Number(p.col) === Number(col));
+    if (existing && existing.operatorId !== id) { toast('这一格已经有干员', true); return; }
+    const current = (flowBoard.placements || []).find((p) => p.operatorId === id);
+    if (!current && (flowBoard.placements || []).length >= maxField) { toast('场上最多 10 人', true); return; }
+    flowBench = flowBench.filter((x) => x !== id);
+    if (current) { current.row = row; current.col = col; }
+    else {
+      flowBoard.placements = flowBoard.placements || [];
+      flowBoard.placements.push({ operatorId: id, row, col, facing: 'right' });
+    }
+    flowSelected = '';
+    renderFlow();
+  }
+
+  function flowMoveBench(id, index = null) {
+    const at = index === null || index === undefined ? flowBench.length : index;
+    if (at >= BENCH_SIZE) { toast('备战区已满（10 格）', true); return; }
+    flowBoard.placements = (flowBoard.placements || []).filter((p) => p.operatorId !== id);
+    flowBench = flowBench.filter((x) => x !== id);
+    flowBench.splice(Math.min(at, flowBench.length), 0, id);
+    flowSelected = '';
+    renderFlow();
+  }
+
+  function flowUnplace(id) {
+    flowBoard.placements = (flowBoard.placements || []).filter((p) => p.operatorId !== id);
+    flowBench = flowBench.filter((x) => x !== id);
+    flowSelected = '';
+    renderFlow();
+  }
+
+  function flowRotate(id) {
+    const p = (flowBoard.placements || []).find((x) => x.operatorId === id);
+    if (!p) return;
+    const at = FACING_ORDER.indexOf(normalizeFacing(p.facing));
+    p.facing = FACING_ORDER[(at + 1) % FACING_ORDER.length];
+    flowSelected = '';
+    renderFlow();
+  }
+
+  function flowOperatorDetailHtml(o) {
+    if (!o) return '';
+    const bonds = (o.bonds || []).map((id) => bond(id)).filter(Boolean);
+    return '<div class="flow-op-detail">' +
+      '<div class="flow-op-detail-head"><b>' + esc(o.name) + '</b><span>' + esc(o.class || o.profession || '') + (o.cost != null ? ' · 费用 ' + esc(o.cost) : '') + '</span></div>' +
+      '<div class="flow-op-detail-sec"><em>特质</em><p>' + (o.trait ? linkedRich(o.trait) : '暂无特质数据') + '</p></div>' +
+      '<div class="flow-op-detail-sec"><em>盟约</em>' + (bonds.length
+        ? '<div class="flow-op-detail-bonds">' + bonds.map((b) => {
+          const summary = String(b.summary || '').replace(new RegExp('^【' + b.name + '】'), '');
+          return '<span title="' + attr(summary) + '"><b>【' + esc(b.name) + '】</b>' + esc(summary) + '</span>';
+        }).join('') + '</div>'
+        : '<p>该干员没有盟约数据。</p>') + '</div>' +
+    '</div>';
+  }
+
+  function flowStepHtml() {
+    if (flowStep === 0) {
+      const q = flowQuery.trim().toLowerCase();
+      const bonds = ['all', ...BOND_FILTER_ORDER.filter((id) => state.bondLibrary?.[id]).slice(0, 14)];
+      const list = Object.values(state.operators || {})
+        .filter((o) => o && o.name && o.name !== '未知干员')
+        .filter((o) => flowBond === 'all' || (o.bonds || []).includes(flowBond))
+        .filter((o) => flowTier === 'all' || operatorTier(o) === flowTier)
+        .filter((o) => flowKind === 'all' || String(o.trait || '').startsWith(flowKind))
+        .filter((o) => flowTrigger === 'all' || String(o.trait || '').includes(flowTrigger))
+        .filter((o) => !q || o.name.toLowerCase().includes(q) || String(window.OP_PINYIN?.[o.name]?.full || '').toLowerCase().includes(q) || String(window.OP_PINYIN?.[o.name]?.initials || '').toLowerCase().includes(q))
+        .sort((a, b) => (tierNumber(a) - tierNumber(b)) || a.name.localeCompare(b.name, 'zh'));
+      const rows = list.map((o) => {
+        const on = flowPicked.includes(o.id);
+        return '<div class="flow-roster-item' + (flowDetailId === o.id ? ' open' : '') + '">' +
+          '<button class="flow-roster-row' + (on ? ' on' : '') + '" type="button" data-flow-pick="' + attr(o.id) + '">' +
+          '<img src="' + avatarSrc(o.avatar) + '" alt="" style="--tier-color:' + tierColor(o) + ';--rarity:' + rarityColor(o) + '" />' +
+          '<span class="flow-roster-main"><b>' + esc(o.name) + '</b><em>' + esc((o.bonds || []).map((id) => state.bondLibrary?.[id]?.name || id).join(' / ')) + '</em></span>' +
+          '<span class="flow-roster-trait">' + esc(String(o.trait || '').slice(0, 42)) + '</span>' +
+          '<i>' + (on ? '✓' : '+') + '</i></button>' +
+          (flowDetailId === o.id ? flowOperatorDetailHtml(o) : '') +
+        '</div>';
+      }).join('');
+      return '<div class="flow-shell">' +
+        '<div class="flow-card"><div class="flow-card-head"><b>先把人放进池子</b><span>不摆位，选完再统一处理</span></div>' +
+        '<input class="flow-search" data-flow-search value="' + attr(flowQuery) + '" placeholder="搜索干员 / 拼音" />' +
+        '<div class="flow-chips flow-tier-chips"><span class="flow-chip-label">等阶</span>' + ['all', ...TIER_ORDER].map((t) => '<button type="button" class="' + (flowTier === t ? 'on' : '') + '" data-flow-tier="' + attr(t) + '">' + esc(t === 'all' ? '全部' : t) + '</button>').join('') + '<button type="button" class="flow-reset" data-flow-reset>重置筛选</button></div>' +
+        '<div class="flow-chips">' + bonds.map((id) => '<button type="button" class="' + (flowBond === id ? 'on' : '') + '" data-flow-bond="' + attr(id) + '">' + esc(id === 'all' ? '全部' : (state.bondLibrary?.[id]?.name || id)) + '</button>').join('') + '</div>' +
+        '<div class="flow-chips">' + ['all', ...TRAIT_KINDS].map((k) => '<button type="button" class="' + (flowKind === k ? 'on' : '') + '" data-flow-kind="' + attr(k) + '">' + esc(k === 'all' ? '全部类型' : k) + '</button>').join('') + '</div>' +
+        '<div class="flow-chips">' + ['all', '战斗中', '战斗开始时', '进入休整期时', '休整期结束时', '获得时', '开启技能时'].map((t) => '<button type="button" class="' + (flowTrigger === t ? 'on' : '') + '" data-flow-trigger="' + attr(t) + '">' + esc(t === 'all' ? '全部触发' : t) + '</button>').join('') + '</div>' +
+        '<div class="flow-roster">' + rows + '</div></div>' +
+        '<div class="flow-picked"><b>已选 ' + flowPicked.length + '</b>' + flowPicked.map((id) => '<span data-flow-unpick="' + attr(id) + '">' + esc(op(id)?.name || id) + ' ×</span>').join('') + '</div>' +
+      '</div>';
+    }
+
+    if (flowStep === 1) {
+      const gates = {};
+      const gateCols = new Set();
+      for (const g of (state.meta.boardGates || [])) { gates[g.row + ',' + g.col] = g.type; gateCols.add(g.col); }
+      const byCell = {};
+      for (const p of (flowBoard.placements || [])) byCell[p.row + ',' + p.col] = p;
+      const cells = [];
+      for (let r = 0; r < flowBoard.rows; r++) {
+        for (let c = 0; c < flowBoard.cols; c++) {
+          const p = byCell[r + ',' + c];
+          const o = p ? op(p.operatorId) : null;
+          const gate = gates[r + ',' + c];
+          const gateBlank = gateCols.has(c) && !gate ? ' gate-blank' : '';
+          cells.push('<button type="button" class="flow-cell' + (gateCols.has(c) ? ' gate' : '') + gateBlank + (o ? ' on' : '') + '" data-flow-cell="' + r + ',' + c + '"' + (o ? ' draggable="true" data-flow-drag="' + attr(o.id) + '" data-flow-drag-kind="field" style="--tier-color:' + tierColor(o) + '"' : '') + '>' +
+            (gate ? '<span class="flow-gate ' + attr(gate) + '">' + (gate === 'blue' ? '蓝门' : '红门') + '</span>' : '') +
+            (o ? '<img src="' + avatarSrc(o.avatar) + '" alt="' + attr(o.name) + '" draggable="false" /><span class="facing-mark" data-dir="' + attr(normalizeFacing(p.facing)) + '"></span>' : '') +
+          '</button>');
+        }
+      }
+      const pool = flowPicked;
+      const benchSlots = Array.from({ length: BENCH_SIZE }, (_, i) => {
+        const id = flowBench[i];
+        const o = id ? op(id) : null;
+        return '<button type="button" class="flow-bench-slot' + (o ? ' on' : '') + '" data-flow-bench="' + i + '"' + (o ? ' draggable="true" data-flow-drag="' + attr(o.id) + '" data-flow-drag-kind="bench" style="--tier-color:' + tierColor(o) + '"' : '') + '>' + (o ? '<img src="' + avatarSrc(o.avatar) + '" alt="' + attr(o.name) + '" draggable="false" />' : (i + 1)) + '</button>';
+      }).join('');
+      return '<div class="flow-shell">' +
+        '<div class="flow-card"><div class="flow-card-head"><b>站位</b><span>上场最多 10 人 · 备战区 10 格 · 无朝向 / 无顺序</span></div>' +
+        '<div class="flow-pool" data-flow-pool-drop>' + (pool.length ? pool.map((id) => {
+          const onField = (flowBoard.placements || []).some((p) => p.operatorId === id);
+          const onBench = flowBench.includes(id);
+          return '<button type="button" class="' + (flowSelected === id ? 'on' : '') + (onField || onBench ? ' placed' : '') + '" draggable="true" data-flow-select="' + attr(id) + '" data-flow-drag="' + attr(id) + '" data-flow-drag-kind="pool" title="' + attr((op(id)?.name || id) + (onField ? ' · 已上场' : onBench ? ' · 备战区' : ' · 待放入')) + '"><img src="' + avatarSrc(op(id)?.avatar) + '" alt="" draggable="false" /><span>' + esc(op(id)?.name || id) + '</span></button>';
+        }).join('') : '<span class="flow-muted">还没有选人，回上一步先选人。</span>') + '</div>' +
+        '<div class="flow-board" style="--cols:' + flowBoard.cols + '">' + cells.join('') + '</div>' +
+        '<div class="flow-bench"><span>备战区</span><div>' + benchSlots + '</div></div>' +
+        '<p class="flow-muted">拖头像到棋盘 / 备战区；点棋盘上的干员换朝向；拖回上方池子可拿回。也可以先点头像再点格子。</p></div>' +
+        (() => { const p = buildTraitPanels(flowBoard, flowBench); return p.left + p.right; })() +
+      '</div>';
+    }
+
+    if (flowStep === 2) {
+      const stages = flowStages.map((s, i) => {
+        const lineup = (s.lineup || []).slice(0, 9);
+        const available = flowPicked.filter((id) => !lineup.includes(id));
+        return '<div class="flow-stage"><div class="flow-stage-head"><b>' + esc(s.label || ('阶段 ' + (i + 1))) + '</b>' +
+          '<span class="flow-stage-actions"><button type="button" data-flow-stage-fill="' + i + '">填入可用</button>' +
+          (flowStages.length > 1 ? '<button type="button" class="flow-stage-del" data-flow-stage-remove-block="' + i + '" title="删除这个阶段">×</button>' : '') + '</span></div>' +
+          '<div class="flow-stage-pool"><em>可用池 · 拖入本阶段</em>' + (available.length ? available.map((id) => '<button type="button" draggable="true" data-flow-drag="' + attr(id) + '" data-flow-drag-kind="stage" data-flow-stage-source="' + i + '" style="--tier-color:' + tierColor(op(id)) + '"><img src="' + avatarSrc(op(id)?.avatar) + '" alt="" draggable="false" />' + esc(op(id)?.name || id) + '</button>').join('') : '<span class="flow-muted">这个阶段已经用完可用池</span>') + '</div>' +
+          '<div class="flow-stage-slots flow-stage-drop" data-flow-stage-drop="' + i + '">' + Array.from({ length: 9 }, (_, j) => {
+            const id = lineup[j];
+            const o = id ? op(id) : null;
+            return o ? '<button type="button" draggable="true" data-flow-stage-remove="' + i + ',' + j + '" data-flow-drag="' + attr(id) + '" data-flow-drag-kind="stage" data-flow-stage-source="' + i + '" style="--tier-color:' + tierColor(o) + '"><img src="' + avatarSrc(o.avatar) + '" alt="' + attr(o.name) + '" draggable="false" /><span>' + esc(o.name) + '</span></button>' : '<span class="empty">' + (j + 1) + '</span>';
+          }).join('') + '</div>' +
+          '<input class="flow-note" data-flow-stage-note="' + i + '" value="' + attr(s.note || '') + '" placeholder="这一阶段做什么" /></div>';
+      }).join('');
+      return '<div class="flow-shell">' +
+        '<div class="flow-card"><div class="flow-card-head"><b>节奏</b><span>池子可复用 · 每个阶段同一人不重复</span></div>' +
+        '<div class="flow-pending"><b>选人池 ' + flowPicked.length + '</b>' + (flowPicked.length ? flowPicked.map((id) => '<span>' + esc(op(id)?.name || id) + '</span>').join('') : '<em>先回上一步选人</em>') + '</div>' +
+        '<div class="flow-stage-add-row"><button type="button" class="btn btn-small" data-flow-stage-add' + (flowStages.length >= 5 ? ' disabled' : '') + '>+ 增加阶段</button><span>每个阶段最多 9 人；同一个人可出现在不同阶段，但同一阶段只出现一次。</span></div>' +
+        '<div class="flow-stages">' + stages + '</div></div>' +
+      '</div>';
+    }
+
+    if (flowStep === 3) {
+      const fieldIds = (flowBoard.placements || []).map((p) => p.operatorId);
+      const fieldSet = new Set(fieldIds);
+      const coreIds = (state.coreOperators || []).map((c) => c.operatorId).filter((id) => fieldSet.has(id)).slice(0, 6);
+      state.coreOperators = coreIds.map((id) => ({ operatorId: id, role: '' }));
+      const candidates = fieldIds.filter((id) => !coreIds.includes(id));
+      const coreCards = coreIds.map((id) => {
+        const o = op(id);
+        return o ? '<div class="flow-core-card" draggable="true" data-flow-drag="' + attr(id) + '" data-flow-drag-kind="core"><img src="' + avatarSrc(o.avatar) + '" alt="' + attr(o.name) + '" draggable="false" style="--tier-color:' + tierColor(o) + '" /><b>' + esc(o.name) + '</b><button type="button" class="flow-core-remove" data-flow-core-remove="' + attr(id) + '">移出核心</button>' + coreEquipHtml(o) + '</div>' : '';
+      }).join('');
+      return '<div class="flow-shell">' +
+        '<div class="flow-card"><div class="flow-card-head"><b>核心干员 / 装备</b><span>核心 ' + coreIds.length + ' / 6 · 拖头像加入 / 拖出移出</span></div>' +
+        '<div class="flow-core-list" data-flow-core-drop>' + (coreCards || '<p class="flow-muted">还没有核心干员，把下方头像拖到这里。</p>') + '</div>' +
+        '<div class="flow-candidates" data-flow-core-out><b>上场干员 · 拖入上方核心区</b>' + (candidates.length ? candidates.map((id) => '<button type="button" class="flow-core-candidate" draggable="true" data-flow-drag="' + attr(id) + '" data-flow-drag-kind="core-candidate" data-flow-core-add="' + attr(id) + '" style="--tier-color:' + tierColor(op(id)) + '"><img src="' + avatarSrc(op(id)?.avatar) + '" alt="" draggable="false" />' + esc(op(id)?.name || id) + '</button>').join('') : '<span class="flow-muted">所有上场干员都已在核心区</span>') + '</div>' +
+        '<p class="flow-muted">装备只跟核心 6 人走；点装备槽添加 / 替换。拖核心头像到下方上场区可移出。</p></div>' +
+      '</div>';
+    }
+
+    const st = state.strategy || { main: '', alternatives: [], reason: '' };
+    const all = Object.values(state.strategyLibrary || {});
+    const main = st.main && strategyById(st.main) ? strategyById(st.main) : null;
+    const alts = (st.alternatives || []).filter((id) => id !== st.main && strategyById(id)).slice(0, 2);
+    const kindText = (s) => s.kind === 'active' ? '主动' : s.kind === 'both' ? '主动 / 被动' : '被动';
+    const card = (s, selectedKind) => '<div class="flow-strategy-card ' + selectedKind + '" title="' + attr(s.name + (s.effect ? '：' + s.effect : '')) + '">' +
+      '<img src="' + strategyIcon(s) + '" alt="" draggable="false" />' +
+      '<div class="flow-strategy-main"><div><b>' + esc(s.name) + '</b><em>' + esc(kindText(s)) + '</em></div>' +
+      '<span>' + (strategyCost(s) ? '消耗 ' + strategyCost(s) : '无消耗') + (s.initialHp != null ? ' · HP ' + esc(s.initialHp) : '') + '</span>' +
+      '<p>' + esc(strategyBrief(s.id) || s.effect || '') + '</p></div>' +
+      '</div>';
+    const q = flowStrategyQuery.trim().toLowerCase();
+    const candidates = all.filter((s) => s.id !== st.main && !alts.includes(s.id) && (!q || s.name.toLowerCase().includes(q)));
+    const selected = (main ? '<div class="flow-strategy-selected"><div class="flow-strategy-selected-head"><b>主选</b><span>1 个</span></div>' + card(main, 'main') +
+      '<button type="button" class="flow-strategy-remove" data-flow-strategy-clear>移除主选</button></div>' : '<p class="flow-muted">还没有主选；从下方选中一个设为「主选」，也可以只保留次选或不选。</p>') +
+      '<div class="flow-strategy-selected"><div class="flow-strategy-selected-head"><b>次选</b><span>' + alts.length + ' / 2</span></div>' +
+      (alts.length ? alts.map((id) => card(strategyById(id), 'alt') + '<button type="button" class="flow-strategy-remove" data-flow-strategy-remove="' + attr(id) + '">移除次选</button>').join('') : '<p class="flow-muted">可 0–2 个。</p>') + '</div>';
+    return '<div class="flow-shell">' +
+      '<div class="flow-card"><div class="flow-card-head"><b>盟约与理由</b><span>可 0 主选 / 0–2 次选</span></div>' +
+      selected +
+      '<label class="flow-label">选择理由<textarea data-flow-reason rows="3" maxlength="40">' + esc(st.reason || '') + '</textarea></label>' +
+      '<div class="flow-strategy-pick-head"><b>全部盟约</b><input class="flow-search" data-flow-strategy-search value="' + attr(flowStrategyQuery) + '" placeholder="搜索盟约" /></div>' +
+      '<div class="flow-strategy-list">' + (candidates.length ? candidates.map((s) => '<div class="flow-strategy-pick">' + card(s, '') +
+        '<div class="flow-strategy-pick-actions"><button type="button" data-flow-strategy-main="' + attr(s.id) + '">设为主选</button>' +
+        '<button type="button" data-flow-strategy-alt="' + attr(s.id) + '"' + (alts.length >= 2 ? ' disabled' : '') + '>+ 次选</button></div></div>').join('') : '<p class="flow-muted">没有匹配的盟约。</p>') + '</div>' +
+      '<p class="flow-muted">完成会写回海报；主选可空，次选最多 2 个。</p></div>' +
+    '</div>';
+  }
+
+  function renderFlow() {
+    if (!flowOpen) return;
+    const box = $('#flowMode');
+    const sameStep = box.dataset.step === String(flowStep);
+    const oldBody = box.querySelector('.flow-body');
+    const oldRoster = box.querySelector('.flow-roster');
+    const oldBodyTop = oldBody?.scrollTop || 0;
+    const oldRosterTop = oldRoster?.scrollTop || 0;
+    const total = flowPicked.length;
+    const field = (flowBoard?.placements || []).length;
+    const bench = flowBench.length;
+    box.innerHTML = '<header class="flow-head"><div><div class="flow-kicker">FLOW MODE / ' + (flowStep + 1) + ' OF 5</div><h1>' + esc(FLOW_STEPS[flowStep]) + '</h1></div>' +
+      '<button type="button" class="flow-close" data-flow-close aria-label="退出流程模式">×</button></header>' +
+      '<nav class="flow-stepper">' + FLOW_STEPS.map((s, i) => '<span class="' + (i === flowStep ? 'on' : (i < flowStep ? 'done' : '')) + '"><b>' + (i + 1) + '</b>' + esc(s) + '</span>').join('') + '</nav>' +
+      '<main class="flow-body">' + flowStepHtml() + '</main>' +
+      '<footer class="flow-foot"><span>选人 ' + total + ' · 上场 ' + field + ' · 备战 ' + bench + '</span>' +
+      '<div><button type="button" class="btn" data-flow-prev' + (flowStep === 0 ? ' disabled' : '') + '>上一步</button>' +
+      (flowStep === 4 ? '<button type="button" class="btn btn-primary" data-flow-finish>保存并返回</button>' : '<button type="button" class="btn btn-primary" data-flow-next>下一步</button>') + '</div></footer>';
+    box.dataset.step = String(flowStep);
+    if (sameStep) {
+      const nextBody = box.querySelector('.flow-body');
+      const nextRoster = box.querySelector('.flow-roster');
+      if (nextBody) nextBody.scrollTop = oldBodyTop;
+      if (nextRoster) nextRoster.scrollTop = oldRosterTop;
+    }
+    if (flowStep === 0) {
+      const input = box.querySelector('[data-flow-search]');
+      if (input && flowQuery) { input.focus({ preventScroll: true }); input.setSelectionRange(input.value.length, input.value.length); }
+    }
+    if (flowStep === 4) {
+      const input = box.querySelector('[data-flow-strategy-search]');
+      if (input && flowStrategyQuery) { input.focus({ preventScroll: true }); input.setSelectionRange(input.value.length, input.value.length); }
+    }
+  }
+
+  document.addEventListener('click', (e) => {
+    if (!flowOpen) return;
+    if (Date.now() < flowSuppressClickUntil) return;
+    const t = e.target;
+    if (t.closest('[data-flow-close]')) { flowClose(false); return; }
+    const pick = t.closest('[data-flow-pick]');
+    if (pick) {
+      const id = pick.dataset.flowPick;
+      if (!flowPicked.includes(id)) flowPicked = flowUnique([...flowPicked, id]);
+      flowDetailId = flowDetailId === id ? '' : id;
+      flowSelected = id;
+      renderFlow();
+      return;
+    }
+    const unpick = t.closest('[data-flow-unpick]');
+    if (unpick) {
+      const id = unpick.dataset.flowUnpick;
+      flowPicked = flowPicked.filter((x) => x !== id);
+      if (flowSelected === id) flowSelected = '';
+      if (flowDetailId === id) flowDetailId = '';
+      flowBoard.placements = (flowBoard.placements || []).filter((p) => p.operatorId !== id);
+      flowBench = flowBench.filter((x) => x !== id);
+      flowStages = flowStages.map((s) => ({ ...s, lineup: (s.lineup || []).filter((x) => x !== id) }));
+      renderFlow();
+      return;
+    }
+    if (t.closest('[data-flow-reset]')) {
+      flowQuery = ''; flowBond = 'all'; flowKind = 'all'; flowTrigger = 'all'; flowTier = 'all';
+      renderFlow();
+      return;
+    }
+    const tier = t.closest('[data-flow-tier]');
+    if (tier) { flowTier = tier.dataset.flowTier; renderFlow(); return; }
+    const bond = t.closest('[data-flow-bond]');
+    if (bond) { flowBond = bond.dataset.flowBond; renderFlow(); return; }
+    const kind = t.closest('[data-flow-kind]');
+    if (kind) { flowKind = kind.dataset.flowKind; renderFlow(); return; }
+    const trigger = t.closest('[data-flow-trigger]');
+    if (trigger) { flowTrigger = trigger.dataset.flowTrigger; renderFlow(); return; }
+    const sel = t.closest('[data-flow-select]');
+    if (sel) { flowSelected = sel.dataset.flowSelect; renderFlow(); return; }
+    const facingBtn = t.closest('[data-flow-facing]');
+    if (facingBtn) {
+      const p = (flowBoard.placements || []).find((x) => x.operatorId === facingBtn.dataset.flowFacing);
+      if (p) {
+        const at = FACING_ORDER.indexOf(normalizeFacing(p.facing));
+        p.facing = FACING_ORDER[(at + 1) % FACING_ORDER.length];
+        renderFlow();
+      }
+      return;
+    }
+    const cell = t.closest('[data-flow-cell]');
+    if (cell) {
+      const [r, c] = cell.dataset.flowCell.split(',').map(Number);
+      if (flowSelected) { flowMoveField(flowSelected, r, c); return; }
+      const opId = (flowBoard.placements || []).find((p) => Number(p.row) === r && Number(p.col) === c)?.operatorId;
+      if (opId) flowRotate(opId);
+      return;
+    }
+    const benchSlot = t.closest('[data-flow-bench]');
+    if (benchSlot) {
+      const i = Number(benchSlot.dataset.flowBench);
+      if (flowSelected) { flowMoveBench(flowSelected, i); return; }
+      const id = flowBench[i];
+      if (id) flowUnplace(id);
+      return;
+    }
+    const stageFill = t.closest('[data-flow-stage-fill]');
+    if (stageFill) {
+      const i = Number(stageFill.dataset.flowStageFill);
+      const s = flowStages[i];
+      const pending = flowPendingStageIds(i);
+      const room = 9 - (s.lineup || []).length;
+      if (!pending.length) { toast('这个阶段没有可再加入的干员', true); return; }
+      s.lineup = flowUnique([...(s.lineup || []), ...pending.slice(0, Math.max(0, room))]).slice(0, 9);
+      renderFlow();
+      return;
+    }
+    if (t.closest('[data-flow-stage-add]')) {
+      if (flowStages.length >= 5) { toast('最多 5 个阶段', true); return; }
+      flowStages.push({ id: 'flow-stage-' + Date.now(), label: '阶段 ' + (flowStages.length + 1), lineupSource: 'manual', lineup: [], note: '' });
+      renderFlow();
+      return;
+    }
+    const stageBlockRemove = t.closest('[data-flow-stage-remove-block]');
+    if (stageBlockRemove) {
+      if (flowStages.length <= 1) { toast('至少保留 1 个阶段', true); return; }
+      const i = Number(stageBlockRemove.dataset.flowStageRemoveBlock);
+      flowStages.splice(i, 1);
+      renderFlow();
+      return;
+    }
+    const stageRemove = t.closest('[data-flow-stage-remove]');
+    if (stageRemove) {
+      const [i, j] = stageRemove.dataset.flowStageRemove.split(',').map(Number);
+      flowStages[i].lineup.splice(j, 1);
+      renderFlow();
+      return;
+    }
+    const coreAdd = t.closest('[data-flow-core-add]');
+    if (coreAdd) {
+      const id = coreAdd.dataset.flowCoreAdd;
+      const fieldIds = new Set((flowBoard.placements || []).map((p) => p.operatorId));
+      const current = (state.coreOperators || []).filter((c) => fieldIds.has(c.operatorId));
+      if (current.length >= 6) { toast('核心最多 6 人', true); return; }
+      if (!current.some((c) => c.operatorId === id)) current.push({ operatorId: id, role: '' });
+      state.coreOperators = current;
+      renderFlow();
+      return;
+    }
+    const coreRemove = t.closest('[data-flow-core-remove]');
+    if (coreRemove) {
+      const fieldIds = new Set((flowBoard.placements || []).map((p) => p.operatorId));
+      state.coreOperators = (state.coreOperators || []).filter((c) => c.operatorId !== coreRemove.dataset.flowCoreRemove && fieldIds.has(c.operatorId));
+      renderFlow();
+      return;
+    }
+    const strategyMain = t.closest('[data-flow-strategy-main]');
+    if (strategyMain) {
+      const id = strategyMain.dataset.flowStrategyMain;
+      state.strategy = { main: id, alternatives: (state.strategy?.alternatives || []).filter((x) => x !== id).slice(0, 2), reason: state.strategy?.reason || '' };
+      renderFlow();
+      return;
+    }
+    const strategyAlt = t.closest('[data-flow-strategy-alt]');
+    if (strategyAlt) {
+      const id = strategyAlt.dataset.flowStrategyAlt;
+      const alts = (state.strategy?.alternatives || []).filter((x) => x !== state.strategy?.main && strategyById(x));
+      if (alts.includes(id) || alts.length >= 2) { toast(alts.length >= 2 ? '次选最多 2 个' : '这个盟约已在次选', true); return; }
+      state.strategy = { ...(state.strategy || {}), alternatives: [...alts, id] };
+      renderFlow();
+      return;
+    }
+    const strategyRemove = t.closest('[data-flow-strategy-remove]');
+    if (strategyRemove) {
+      const id = strategyRemove.dataset.flowStrategyRemove;
+      state.strategy = { ...(state.strategy || {}), alternatives: (state.strategy?.alternatives || []).filter((x) => x !== id) };
+      renderFlow();
+      return;
+    }
+    if (t.closest('[data-flow-strategy-clear]')) {
+      state.strategy = { ...(state.strategy || {}), main: '', alternatives: (state.strategy?.alternatives || []).slice(0, 2) };
+      renderFlow();
+      return;
+    }
+    if (t.closest('[data-flow-prev]')) { if (flowStep > 0) { flowStep--; renderFlow(); } return; }
+    if (t.closest('[data-flow-next]')) {
+      if (flowStep === 0 && !flowPicked.length) { toast('先选至少 1 名干员', true); return; }
+      if (flowStep < 4) { flowStep++; renderFlow(); }
+      return;
+    }
+    if (t.closest('[data-flow-finish]')) { flowClose(true); return; }
+  });
+
+  document.addEventListener('dragstart', (e) => {
+    if (!flowOpen) return;
+    const src = e.target.closest('[data-flow-drag]');
+    if (!src) return;
+    flowDrag = { id: src.dataset.flowDrag, kind: src.dataset.flowDragKind || 'pool' };
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', flowDrag.id);
+  });
+  document.addEventListener('dragend', () => {
+    flowDrag = null;
+    $$('.drag-over').forEach((el) => el.classList.remove('drag-over'));
+  });
+  document.addEventListener('dragover', (e) => {
+    if (!flowOpen || !flowDrag) return;
+    const zone = e.target.closest('[data-flow-cell],[data-flow-bench],[data-flow-pool-drop],[data-flow-stage-drop],[data-flow-core-drop],[data-flow-core-out]');
+    if (!zone) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    $$('.drag-over').forEach((el) => el.classList.remove('drag-over'));
+    zone.classList.add('drag-over');
+  });
+  document.addEventListener('drop', (e) => {
+    if (!flowOpen || !flowDrag) return;
+    const { id, kind } = flowDrag;
+    const cell = e.target.closest('[data-flow-cell]');
+    const bench = e.target.closest('[data-flow-bench]');
+    const stage = e.target.closest('[data-flow-stage-drop]');
+    const coreList = e.target.closest('[data-flow-core-drop]');
+    const coreOut = e.target.closest('[data-flow-core-out]');
+    const pool = e.target.closest('[data-flow-pool-drop]');
+    if (!cell && !bench && !stage && !coreList && !coreOut && !pool) return;
+    e.preventDefault();
+    flowSuppressClickUntil = Date.now() + 250;
+    if (cell) {
+      const [r, c] = cell.dataset.flowCell.split(',').map(Number);
+      flowDrag = null; flowMoveField(id, r, c); return;
+    }
+    if (bench) {
+      flowDrag = null; flowMoveBench(id, Number(bench.dataset.flowBench)); return;
+    }
+    if (pool) {
+      flowDrag = null; flowUnplace(id); return;
+    }
+    if (stage) {
+      const i = Number(stage.dataset.flowStageDrop);
+      const s = flowStages[i];
+      if (!flowPicked.includes(id)) { flowDrag = null; return; }
+      if ((s.lineup || []).includes(id)) { toast('这个阶段已经有该干员', true); flowDrag = null; return; }
+      if ((s.lineup || []).length >= 9) { toast('阶段最多 9 人', true); flowDrag = null; return; }
+      s.lineup = [...(s.lineup || []), id];
+      flowDrag = null; renderFlow(); return;
+    }
+    if (coreList) {
+      if (kind === 'core-candidate') {
+        const fieldIds = new Set((flowBoard.placements || []).map((p) => p.operatorId));
+        const current = (state.coreOperators || []).filter((c) => fieldIds.has(c.operatorId));
+        if (current.length >= 6) { toast('核心最多 6 人', true); flowDrag = null; return; }
+        if (!current.some((c) => c.operatorId === id)) current.push({ operatorId: id, role: '' });
+        state.coreOperators = current;
+        flowDrag = null; renderFlow(); return;
+      }
+      flowDrag = null; return;
+    }
+    if (coreOut) {
+      if (kind === 'core') {
+        state.coreOperators = (state.coreOperators || []).filter((c) => c.operatorId !== id);
+        flowDrag = null; renderFlow(); return;
+      }
+      flowDrag = null; return;
+    }
+    flowDrag = null;
+  });
+
+  document.addEventListener('input', (e) => {
+    if (!flowOpen) return;
+    if (e.target.matches('[data-flow-search]')) { flowQuery = e.target.value; renderFlow(); return; }
+    if (e.target.matches('[data-flow-strategy-search]')) { flowStrategyQuery = e.target.value; renderFlow(); return; }
+    if (e.target.matches('[data-flow-stage-note]')) { flowStages[Number(e.target.dataset.flowStageNote)].note = e.target.value; return; }
+    if (e.target.matches('[data-flow-reason]')) { state.strategy = { ...(state.strategy || {}), reason: e.target.value }; return; }
+  });
+
+  document.addEventListener('change', (e) => {
+    if (!flowOpen) return;
+    if (e.target.matches('[data-flow-main]')) {
+      const main = e.target.value;
+      state.strategy = { ...(state.strategy || {}), main, alternatives: (state.strategy?.alternatives || []).filter((id) => id !== main) };
+      renderFlow();
+      return;
+    }
+    if (e.target.matches('[data-flow-alt]')) {
+      const alt = e.target.value;
+      state.strategy = { ...(state.strategy || {}), alternatives: alt ? [alt] : [] };
+      renderFlow();
+    }
+  });
 
   /* ------------------------------------------------------------
      Events
@@ -4795,13 +6078,14 @@
     const termOp = e.target.closest('[data-term-op]');
     if (termOp) {
       e.preventDefault();
-      // 浮窗保持打开：点干员只是把详情抽屉拉到右边，收掉浮窗会让人丢了羁绊上下文。
+      // 浮窗保持打开：点干员只是把详情抽屉拉到右边，收掉浮窗会让人丢了盟约上下文。
       openDetail(termOp.dataset.termOp);
       return;
     }
     if (e.target.closest('[data-close]')) { closeModal(); return; }
     if (e.target.closest('[data-export-back]')) { closeModal(); return; }
     if (e.target.closest('[data-export-force]')) { closeModal(); exportPoster(true); return; }
+    if (e.target.closest('#flowBtn')) { flowOpenMode(); return; }
     if (e.target.closest('#editBtn')) { toggleEdit(); return; }
     if (e.target.closest('#exportBtn')) { exportPoster(); return; }
     if (e.target.closest('#newBtn')) { newLineup(); return; }
@@ -4810,6 +6094,7 @@
     const boardPreset = e.target.closest('[data-board-preset]');
     if (boardPreset) { const [c, r] = boardPreset.dataset.boardPreset.split('x'); applyBoardSize(c, r); return; }
     if (e.target.closest('[data-board-open-maps]')) { closeModal(); openMaps(mapSelectedId, 0); return; }
+    if (e.target.closest('[data-board-checks]')) { openPlacementChecks(); return; }
     if (e.target.closest('#rosterBtn')) {
       if ($('#rosterDrawer')?.hidden) openRoster(); else closeRoster();
       return;
@@ -4849,6 +6134,7 @@
       return;
     }
     if (e.target.closest('[data-rf-clear]')) {
+      rosterFilter.tier.clear();
       rosterFilter.trigger.clear();
       rosterFilter.kind.clear();
       rosterFilter.bond.clear();
@@ -4996,6 +6282,9 @@
       else openDetail(stageAvatar.dataset.opId);
       return;
     }
+    if (e.target.closest('[data-stage-add-block]')) { addStageBlock(); return; }
+    const stageBlockRemove = e.target.closest('[data-stage-remove-block]');
+    if (stageBlockRemove) { removeStageBlock(Number(stageBlockRemove.dataset.stageRemoveBlock)); return; }
     const stageAdd = e.target.closest('[data-stage-add]');
     if (stageAdd) { openStagePicker(Number(stageAdd.dataset.stageIndex), stageAdd.dataset.stageKind, null); return; }
     const stagePick = e.target.closest('[data-stage-pick]');
@@ -5013,6 +6302,8 @@
       return;
     }
 
+    const traitChip = e.target.closest('[data-trait-info]');
+    if (traitChip) { openTraitInfo(traitChip.dataset.traitInfo, traitChip); return; }
     const bondRow = e.target.closest('.bond-row');
     if (bondRow) { openBond(bondRow.dataset.bondId, bondRow); return; }
 
@@ -5187,8 +6478,17 @@
   // opened on a narrow screen renders the shared lineup straight into 阅读版.
   const sharedLoaded = applyShareHash();
   initViewMode(sharedLoaded);
+  const presetSelect = $('#presetSelect');
+  if (presetSelect) {
+    presetSelect.value = PRESET;
+    presetSelect.addEventListener('change', () => {
+      const base = location.href.split('?')[0].split('#')[0];
+      location.href = presetSelect.value ? base + '?preset=' + encodeURIComponent(presetSelect.value) : base;
+    });
+  }
   renderPoster();
   fitPoster();
+  if (new URLSearchParams(location.search).has('export')) setTimeout(() => exportPoster(true), 700);
   bindBoardDnD();
   bindMobileBoardDrag();
   // 打开分享链接时上面已经真的写过一次存档；其余情况还没有任何改动，不谎报「已保存」
@@ -5197,6 +6497,7 @@
   setTimeout(maybeShowZoomHint, 900);
   window.__posterDebug = {
     get state() { return state; },
+    get equipmentTrimmed() { return equipmentTrimmed; },
     get zoomed() { return zoomMode; },
     get mobileUI() { return mobileUI; },
     get viewMode() { return mobileUI ? 'read' : 'poster'; },
@@ -5212,6 +6513,7 @@
     openEquipmentInfo,
     renderPoster,
     exportPoster,
+    exportPNG: posterPng,
     get lastExport() { return lastExport; },
     posterCheck,
     migrate,
@@ -5221,8 +6523,12 @@
     redo: () => stepHistory('redo'),
     get historyDepth() { return { undo: timeline.past.length, redo: timeline.future.length }; },
     computeBondCounts,
+    placementChecks,
     measureStrategyText,
     strategySlotInfo,
+    traitActiveOnBench,
+    summarizeTrait,
+    traitGroups,
     openDetail,
     openItemPicker,
     assignStage,
@@ -5247,4 +6553,5 @@
     newLineup
   };
   if (pendingToast) setTimeout(() => toast(pendingToast), 300);
+  if (equipmentTrimmed) setTimeout(() => toast('已按每人 2 件装备整理'), 650);
 })();

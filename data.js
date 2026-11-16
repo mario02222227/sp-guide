@@ -48,7 +48,6 @@
     ],
     "libraryVersion": "社区表112 · 未含塔露拉 · 规程当期141 · v3",
     "proof": "实测 400+ 层",
-    "boardNote": "核心 3 人不建议替，其余先顶位保 3 谢",
     "credit": "",
     "shareUrl": "",
     "showQr": false
@@ -204,10 +203,7 @@
       "big": [
         "arcane_array"
       ],
-      "optional": [
-        "originium_solvent",
-        "pegasus_glory"
-      ]
+      "optional": []
     },
     {
       "operatorId": "degen",
@@ -217,10 +213,7 @@
       "big": [
         "dual_arm"
       ],
-      "optional": [
-        "m3_carapace",
-        "egir_blade"
-      ]
+      "optional": []
     },
     {
       "operatorId": "harold",
@@ -230,16 +223,28 @@
       "big": [
         "reliable_watch"
       ],
-      "optional": [
-        "pegasus_glory",
-        "arcane_array"
-      ]
+      "optional": []
     }
   ],
   "equipmentNotes": {
     "sbell2": "先补剂叠层，再考虑输出；别裸奔。",
     "degen": "只负责 Boss 爆发；活着开出技能。",
     "harold": "层数转治疗；回转装让奶更勤，别给输出装。"
+  },
+  "traitBrief": {
+    "kjera": { "label": "获得", "complex": true, "condition": "获得" },
+    "svash2": { "label": "叠层上限", "value": 75, "unit": "%", "mode": "max" },
+    "sbell2": { "label": "谢拉格层数", "complex": true, "condition": "冻结" },
+    "pramanix": { "label": "谢拉格层数", "complex": true, "condition": "冻结" },
+    "gnosis": { "label": "刷新", "complex": true, "condition": "刷新" },
+    "harold": { "label": "攻击力", "complex": true, "condition": "每5层" },
+    "degen": { "label": "技力 / 生命", "complex": true, "condition": "每6层" },
+    "yak": { "label": "寒冷", "complex": true, "condition": "首次" },
+    "snhunt": { "label": "谢拉格层数", "value": 4, "unit": "层" },
+    "bldsk": { "label": "盟约层数", "complex": true, "condition": "身前" },
+    "cetsyr": { "label": "盟约层数", "value": 10, "unit": "层" },
+    "archet": { "label": "盟约层数", "value": 3, "unit": "层" },
+    "lisa": { "label": "获得触发", "complex": true, "condition": "身前" }
   },
   "bench": [
     "snhunt",
@@ -1797,6 +1802,10 @@
     if (!meta || !meta.name) continue;
     operators[id] = { id, ...meta, avatar: meta.avatar || '__missing', missingData: true, skills: [], talents: [], stats: {}, price: null };
   }
+  const operatorTiers = window.SP_OPERATOR_TIERS || {};
+  for (const o of Object.values(operators)) {
+    if (operatorTiers[o.name]) o.tier = operatorTiers[o.name] + '阶';
+  }
   const prtsRoster = window.SP_ROSTER_PRTS || {};
   for (const o of Object.values(operators)) {
     const p = prtsRoster[o.name];
@@ -1835,12 +1844,24 @@
   for (const [id, b] of Object.entries(cl.bondLibrary || {})) {
     bondLibrary[id] = { ...b, play: bondPlays[id] || '' };
   }
+  const strategyLibrary = {};
+  const strategyCost = {};
+  for (const [id, s] of Object.entries(cl.strategyLibrary || {})) {
+    const m = String(s.effect || '').match(/消耗\s*(\d+)/);
+    if (m) {
+      strategyCost[id] = Number(m[1]);
+      strategyLibrary[id] = { ...s, cost: Number(m[1]) };
+    } else {
+      strategyLibrary[id] = { ...s };
+    }
+  }
   window.GUIDE_DATA = {
     ...poster,
     retiredOperatorIds,
     operators,
     bondLibrary,
-    strategyLibrary: cl.strategyLibrary || {},
+    strategyLibrary,
+    strategyCost,
     strategyBrief,
     equipmentEffects,
     strategy: poster.strategy || { main: '', alternatives: [], reason: '' }

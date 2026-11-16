@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>卫戍协议 · 规程｜一图流工具</title>
-  <meta name="description" content="明日方舟「卫戍协议：规程」谢拉格冻结叠层一图流：主叠层、主输出、装备、站位与 1-14 回合路线。固定 4:3 海报，可编辑、可导出 3200×2400 PNG。" />
+  <meta name="description" content="明日方舟「卫戍协议：规程」一图流工具：谢拉格冻结叠层 / 乌萨斯公式化运营双示例，支持流程模式、备战区、特质总和、站位关系校验。固定 4:3 海报，可编辑、可导出 3200×2400 PNG。" />
   <meta name="theme-color" content="#0b0706" />
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%230b0706'/%3E%3Cpath d='M14 44V20h8l10 14 10-14h8v24h-8V32L32 46 22 32v12z' fill='%23f6b61e'/%3E%3C/svg%3E" />
   <link rel="stylesheet" href="styles.css" />
@@ -13,7 +13,15 @@
 <body>
   <header class="appbar">
     <div class="appbar-actions">
+      <a class="test-version" href="test.html" title="V2 测试页；谢拉格冻结叠层为 V1">V2 测试 · 谢拉格 V1</a>
       <span class="save-state" id="saveState" data-state="idle" aria-live="polite">改动自动保存在本机</span>
+      <label class="preset-picker" title="切换示例">
+        <span>示例</span>
+        <select id="presetSelect" aria-label="切换攻略示例">
+          <option value="">谢拉格 · 冻结叠层</option>
+          <option value="ursus">乌萨斯 · 公式化运营</option>
+        </select>
+      </label>
       <button class="btn btn-ghost" id="mapsBtn" type="button">
         <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M3 6l6-3 6 3 6-3v15l-6 3-6-3-6 3V6zm6-3v15m6-12v15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>
         <span>战场地图</span>
@@ -43,6 +51,7 @@
   </main>
 
   <section class="mobile-read" id="mobileRead" aria-label="手机阅读版"></section>
+  <section class="flow-mode" id="flowMode" hidden aria-label="流程模式"></section>
 
   <aside class="drawer drawer-left" id="rosterDrawer" hidden aria-label="干员库">
     <div class="drawer-head">
@@ -106,6 +115,10 @@
 
   <div class="zoom-hint" id="zoomHint" hidden>海报在手机上会被缩小。<b>点右下角「放大」</b>按原尺寸查看，可拖动。</div>
   <div class="facing-coach" id="facingCoach" aria-live="polite"></div>
+  <button class="zoom-btn flow-btn" id="flowBtn" type="button" title="按流程重新组一套阵容">
+    <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M4 5h6v5H4zM14 5h6v5h-6zM9 19h6v-5H9zM7 10v4h10v-4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>
+    <span>流程模式</span>
+  </button>
   <button class="zoom-btn read-btn" id="readBtn" type="button" title="切换到手机竖屏阅读版">
     <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><rect x="6" y="2.5" width="12" height="19" rx="2" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M9 7h6M9 11h6M9 15h3" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
     <span>阅读版</span>
@@ -155,8 +168,10 @@
       document.addEventListener('DOMContentLoaded', function () {
         document.getElementById('bootReset').onclick = function () {
           try {
-            localStorage.removeItem('sp-guide-poster-v2');
-            localStorage.removeItem('sp-view-mode-v1');
+            var preset = new URLSearchParams(location.search).get('preset') || '';
+            var suffix = preset ? ':' + preset : '';
+            localStorage.removeItem('sp-guide-poster-v2' + suffix);
+            localStorage.removeItem('sp-view-mode-v1' + suffix);
           } catch (err) { /* ignore */ }
           location.reload();
         };
@@ -197,7 +212,9 @@
   <script src="data/pinyin.js"></script>
   <script src="data/maps.js"></script>
   <script src="data/ranges.js"></script>
+  <script src="data/operator-tiers.js"></script>
   <script src="data.js"></script>
+  <script src="data/ursus-preset.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
