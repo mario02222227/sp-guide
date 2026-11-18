@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>卫戍协议 · 规程｜一图流工具</title>
-  <meta name="description" content="明日方舟「卫戍协议：规程」一图流工具：谢拉格冻结叠层 / 乌萨斯公式化运营双示例，支持流程模式、备战区、特质总和、站位关系校验。固定 4:3 海报，可编辑、可导出 3200×2400 PNG。" />
+  <meta name="description" content="明日方舟「卫戍协议：规程」一图流工具：乌萨斯公式化运营示例，支持流程模式、备战区、特质总和、站位关系校验。固定 4:3 海报，可编辑、可导出 3200×2400 PNG。" />
   <meta name="theme-color" content="#0b0706" />
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%230b0706'/%3E%3Cpath d='M14 44V20h8l10 14 10-14h8v24h-8V32L32 46 22 32v12z' fill='%23f6b61e'/%3E%3C/svg%3E" />
   <link rel="stylesheet" href="styles.css" />
@@ -12,16 +12,16 @@
 </head>
 <body>
   <header class="appbar">
+    <div class="appbar-brand">
+      <strong>卫戍协议</strong>
+      <span id="appbarTitle">一图流</span>
+    </div>
     <div class="appbar-actions">
-      <a class="test-version" href="test.html" title="V2 测试页；谢拉格冻结叠层为 V1">V2 测试 · 谢拉格 V1</a>
-      <span class="save-state" id="saveState" data-state="idle" aria-live="polite">改动自动保存在本机</span>
-      <label class="preset-picker" title="切换示例">
-        <span>示例</span>
-        <select id="presetSelect" aria-label="切换攻略示例">
-          <option value="">谢拉格 · 冻结叠层</option>
-          <option value="ursus">乌萨斯 · 公式化运营</option>
-        </select>
-      </label>
+      <button class="btn btn-ghost" id="flowBtn" type="button" title="分步配这一套：选人、站位、节奏、核心和策略">
+        <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M4 5h6v5H4zM14 5h6v5h-6zM9 19h6v-5H9zM7 10v4h10v-4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>
+        <span>调整阵容</span>
+      </button>
+      <span class="save-state" id="saveState" data-state="idle" hidden aria-live="polite"></span>
       <button class="btn btn-ghost" id="mapsBtn" type="button">
         <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M3 6l6-3 6 3 6-3v15l-6 3-6-3-6 3V6zm6-3v15m6-12v15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>
         <span>战场地图</span>
@@ -30,7 +30,7 @@
         <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M12 3v11m0-11 4 4m-4-4-4 4M5 13v7h14v-7" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
         <span>分享</span>
       </button>
-      <button class="btn btn-ghost" id="editBtn" type="button" aria-pressed="false">
+      <button class="btn btn-ghost" id="editBtn" type="button" aria-pressed="false" title="在海报上直接改字、站位和装备">
         <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M4 20h4L19 9l-4-4L4 16v4zm11.5-14.5 4 4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>
         <span>编辑</span>
       </button>
@@ -46,7 +46,7 @@
 
   <main class="stage" id="stage">
     <div class="poster-shell" id="posterShell">
-      <article class="poster" id="poster" aria-label="卫戍协议规程谢拉格一图流"></article>
+      <article class="poster" id="poster" aria-label="卫戍协议规程乌萨斯一图流"></article>
     </div>
   </main>
 
@@ -55,7 +55,7 @@
 
   <aside class="drawer drawer-left" id="rosterDrawer" hidden aria-label="干员库">
     <div class="drawer-head">
-      <div><strong>干员库</strong><span>行内看盟约与特质；拖到棋盘，或双击看完整详情</span></div>
+      <div><strong>干员库</strong><span>行内看盟约与特质；拖到棋盘，或双击放入第一个空位</span></div>
       <button class="drawer-close" type="button" data-close-drawer="roster" aria-label="关闭干员库">×</button>
     </div>
     <div class="drawer-filters" id="rosterFilters"></div>
@@ -83,7 +83,7 @@
   <div class="edit-bar" id="editBar" hidden>
     <div class="edit-bar-copy">
       <strong>编辑模式</strong>
-      <span>改文字、拖站位、点装备/路线头像替换；改动自动保存，Ctrl+Z 撤销。编辑装饰不会进入导出图。</span>
+      <span>在海报上改已有内容。加人点「干员库」，双击放入第一个空位。从头配用「调整阵容」。改动自动保存，Ctrl+Z 撤销。</span>
     </div>
     <!-- 按用途分四组：回退 / 摆阵容用的库 / 整份文件的进出 / 危险操作单独放最右 -->
     <div class="edit-bar-actions">
@@ -100,6 +100,7 @@
         <button class="btn btn-small" id="equipmentBtn" type="button" aria-expanded="false">装备库</button>
         <button class="btn btn-small" id="variantBtn" type="button" aria-expanded="false">备选</button>
         <button class="btn btn-small" id="boardBtn" type="button">棋盘</button>
+        <button class="btn btn-small btn-danger" id="clearBoardBtn" type="button">清空棋盘</button>
       </div>
       <div class="edit-group" role="group" aria-label="文件">
         <button class="btn btn-small" id="newBtn" type="button">新建</button>
@@ -115,10 +116,6 @@
 
   <div class="zoom-hint" id="zoomHint" hidden>海报在手机上会被缩小。<b>点右下角「放大」</b>按原尺寸查看，可拖动。</div>
   <div class="facing-coach" id="facingCoach" aria-live="polite"></div>
-  <button class="zoom-btn flow-btn" id="flowBtn" type="button" title="按流程重新组一套阵容">
-    <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M4 5h6v5H4zM14 5h6v5h-6zM9 19h6v-5H9zM7 10v4h10v-4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>
-    <span>流程模式</span>
-  </button>
   <button class="zoom-btn read-btn" id="readBtn" type="button" title="切换到手机竖屏阅读版">
     <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><rect x="6" y="2.5" width="12" height="19" rx="2" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M9 7h6M9 11h6M9 15h3" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
     <span>阅读版</span>

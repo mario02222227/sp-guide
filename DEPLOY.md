@@ -19,7 +19,7 @@
 | 主入口（Cloudflare） | <https://sp-guide.pages.dev/> | 国内访问快，分享用这个 |
 | GitHub Pages | <https://mario02222227.github.io/sp-guide/> | 源码仓库：<https://github.com/mario02222227/sp-guide>；国内首屏要等 1–2 分钟（2.8 MB 的素材文件被限速） |
 
-> 乌萨斯推广样张：部署后在主入口后加 `?preset=ursus`，例如 <https://sp-guide.pages.dev/?preset=ursus>；它和谢拉格示例共用一套代码，但草稿槽独立。
+> 主入口打开就是乌萨斯公式化运营示例。旧地址 `?preset=ursus` 仍可用，草稿槽和主页面分开。
 
 更新（改完内容后）：
 
