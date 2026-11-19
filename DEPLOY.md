@@ -26,16 +26,18 @@
 ```powershell
 node tools/make-deploy.mjs
 
-# Cloudflare
+# Cloudflare（登录态在 %APPDATA%\xdg.config\.wrangler\config\default.toml，由 wrangler login 写入）
 $env:CLOUDFLARE_ACCOUNT_ID = "bde83874dc63c966237ec4d8c68542c4"
-node "$env:TEMP\sp-wrangler\node_modules\wrangler\bin\wrangler.js" pages deploy deploy --project-name=sp-guide --branch=main --commit-dirty=true
+node "$env:TEMP\sp-wrangler2\node_modules\wrangler\bin\wrangler.js" pages deploy deploy --project-name=sp-guide --branch=main --commit-dirty=true
 
-# GitHub（登录态由 gh 保存在本机）
+# GitHub（登录态由 gh 保存在本机，gh 本体在 %TEMP%\gh\bin\gh.exe）
 $env:GITHUB_TOKEN = (& "$env:TEMP\gh\bin\gh.exe" auth token)
 node tools/deploy-github.mjs
 ```
 
 > `$env:TEMP` 被清理后，这两条命令会找不到 wrangler / gh；重新装一次即可，或改用各自的网页面板。
+> wrangler 重装：在空目录里 `pnpm add wrangler@4`，并在 `pnpm-workspace.yaml` 里放 `onlyBuiltDependencies: [esbuild, workerd]`，
+> 否则 `whoami` / `deploy` 会报 `Cannot find module 'esbuild'`。
 
 ## 方案 A：GitHub Pages
 
